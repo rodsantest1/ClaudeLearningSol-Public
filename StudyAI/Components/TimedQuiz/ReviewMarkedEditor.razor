@@ -1,0 +1,360 @@
+@* ReviewMarkedEditor.razor
+    Editable phase of the review-marked step. Renders every question the
+    student flagged "Mark for review" as a live, re-answerable question again
+    (pre-filled with whatever they originally chose) — no correct/incorrect
+    info shown here, since nothing has been graded yet. Clicking "Finish Quiz"
+    hands the final (possibly edited) answers back to the parent for grading.
+*@
+
+<div class="review-marked-container">
+    <div class="review-header">
+        <h2>Review Your Marked Questions</h2>
+        <p class="subtitle">
+            You marked @MarkedIndices.Count question@(MarkedIndices.Count != 1 ? "s" : "") for review.
+            Change your answer if you want to — nothing is graded until you finish.
+        </p>
+    </div>
+
+    <div class="marked-questions-list">
+        @foreach (var index in MarkedIndices)
+        {
+            var attempt = Attempts.FirstOrDefault(a => a.QuestionNumber == index + 1);
+            if (attempt != null)
+            {
+                <div class="marked-question-card">
+                    <div class="card-header">
+                        <span class="question-label">Question @attempt.QuestionNumber</span>
+                        @if (!string.IsNullOrEmpty(attempt.Question.Difficulty))
+                        {
+                            <span class="difficulty-badge @attempt.Question.Difficulty.ToLower()">
+                                @attempt.Question.Difficulty
+                            </span>
+                        }
+                    </div>
+
+                    <div class="question-content">
+                        <h3>@attempt.Question.Prompt</h3>
+
+                        @if (attempt.Question.Choices != null && attempt.Question.Choices.Count > 0)
+                        {
+                            <div class="options-container">
+                                @foreach (var option in attempt.Question.Choices)
+                                {
+                                    var isSelected = draftAnswers.TryGetValue(index, out var current) && current == option;
+                                    <button type="button" class="option-button @(isSelected ? "selected" : "")"
+                                            @onclick="() => draftAnswers[index] = option">
+                                        <span class="option-radio">
+                                            @if (isSelected)
+                                            {
+                                                <span class="selected-indicator">✓</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="radio-circle"></span>
+                                            }
+                                        </span>
+                                        <span class="option-text">@option</span>
+                                    </button>
+                                }
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="short-answer-container">
+                                <textarea class="short-answer-input"
+                                          @bind="draftAnswers[index]"
+                                          placeholder="Enter your answer..."
+                                          rows="5"></textarea>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        }
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="action-buttons">
+        <button class="btn btn-primary" @onclick="FinishClicked" disabled="@(isFinalizing || HasBlankAnswer)">
+            @(isFinalizing ? "Grading..." : "Finish Quiz")
+        </button>
+
+        <button class="btn btn-outline" @onclick="OnRestart" disabled="@isFinalizing">
+            Start Over
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public List<StudyAI.Models.QuestionAttempt> Attempts { get; set; } = new();
+
+    [Parameter]
+    public List<int> MarkedIndices { get; set; } = new();
+
+    [Parameter]
+    public EventCallback<Dictionary<int, string>> OnFinish { get; set; }
+
+    [Parameter]
+    public EventCallback OnRestart { get; set; }
+
+    private readonly Dictionary<int, string> draftAnswers = new();
+    private bool isFinalizing = false;
+
+    // → Pre-fill each marked question's draft with the answer the student
+    // originally submitted — editing starts from where they left off, not blank.
+    protected override void OnInitialized()
+    {
+        foreach (var index in MarkedIndices)
+        {
+            var attempt = Attempts.FirstOrDefault(a => a.QuestionNumber == index + 1);
+            if (attempt != null)
+                draftAnswers[index] = attempt.UserAnswer;
+        }
+    }
+
+    private bool HasBlankAnswer =>
+        MarkedIndices.Any(i => string.IsNullOrWhiteSpace(draftAnswers.GetValueOrDefault(i)));
+
+    // → Hand the final answers to the parent for grading. Disabled/guarded
+    // against double-clicks the same way QuizRunner's SubmitAnswer is.
+    private async Task FinishClicked()
+    {
+        if (isFinalizing || HasBlankAnswer)
+            return;
+
+        isFinalizing = true;
+        try
+        {
+            await OnFinish.InvokeAsync(new Dictionary<int, string>(draftAnswers));
+        }
+        finally
+        {
+            isFinalizing = false;
+        }
+    }
+}
+
+<style>
+    .review-marked-container {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 2rem;
+    }
+
+    .review-header {
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+
+    .review-header h2 {
+        margin: 0 0 0.5rem 0;
+        color: #333;
+        font-size: 1.8rem;
+    }
+
+    .subtitle {
+        color: #666;
+        font-size: 1rem;
+        margin: 0;
+    }
+
+    .marked-questions-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .marked-question-card {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        background: #f9f9f9;
+        border-bottom: 1px solid #e0e0e0;
+    }
+
+    .question-label {
+        font-weight: 600;
+        color: #333;
+    }
+
+    .difficulty-badge {
+        padding: 0.35rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .difficulty-badge.easy {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .difficulty-badge.medium {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .difficulty-badge.hard {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .question-content {
+        padding: 1.5rem;
+    }
+
+    .question-content h3 {
+        margin: 0 0 1rem 0;
+        color: #333;
+        font-size: 1.1rem;
+        line-height: 1.5;
+    }
+
+    .options-container {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+
+    .option-button {
+        display: flex;
+        align-items: center;
+        padding: 1rem;
+        border: 2px solid #e0e0e0;
+        border-radius: 6px;
+        background: white;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-align: left;
+        font-size: 1rem;
+        width: 100%;
+    }
+
+    .option-button:hover {
+        border-color: #0066cc;
+        background: #f9f9f9;
+    }
+
+    .option-button.selected {
+        border-color: #0066cc;
+        background: #f0f6ff;
+    }
+
+    .option-radio {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        margin-right: 1rem;
+        border: 2px solid #ddd;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+
+    .option-button.selected .option-radio {
+        border-color: #0066cc;
+        background: #0066cc;
+        color: white;
+        font-size: 0.8rem;
+    }
+
+    .selected-indicator {
+        font-weight: bold;
+    }
+
+    .radio-circle {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: transparent;
+    }
+
+    .option-text {
+        flex: 1;
+        color: #333;
+    }
+
+    .short-answer-container {
+        margin-top: 0.5rem;
+    }
+
+    .short-answer-input {
+        width: 100%;
+        padding: 1rem;
+        border: 2px solid #e0e0e0;
+        border-radius: 6px;
+        font-family: inherit;
+        font-size: 1rem;
+        resize: vertical;
+        transition: border-color 0.2s ease;
+    }
+
+    .short-answer-input:focus {
+        outline: none;
+        border-color: #0066cc;
+        box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 1rem;
+        margin-top: 2rem;
+    }
+
+    .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        flex: 1;
+    }
+
+    .btn-primary {
+        background-color: #0066cc;
+        color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background-color: #0052a3;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+    }
+
+    .btn-primary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    .btn-outline {
+        background: white;
+        color: #666;
+        border: 1px solid #ddd;
+    }
+
+    .btn-outline:hover:not(:disabled) {
+        background: #f9f9f9;
+        border-color: #999;
+    }
+
+    .btn-outline:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+</style>

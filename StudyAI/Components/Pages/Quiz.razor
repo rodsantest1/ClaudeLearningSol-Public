@@ -1,0 +1,757 @@
+@page "/quiz"
+@using StudyAI.Services
+@rendermode InteractiveServer
+@inject IQuizProvider QuizProvider
+@inject IQuizPlanner QuizPlanner
+@inject IJSRuntime JS
+@inject QuizSettings Settings
+@inject Microsoft.AspNetCore.Components.NavigationManager Nav
+
+<PageTitle>Quiz</PageTitle>
+
+<div class="quiz">
+    <a class="back-link" href="/">← Back to home</a>
+    <h1>Regular Quiz</h1>
+
+    @* → Sticky header matching TimedQuiz.razor's .quiz-header exactly (same
+         shared classes, see app.css) — progress/score on the left, a
+         TimedQuiz-style Quit Quiz button on the right. No progress bar here:
+         unlike Timed Quiz, Regular Quiz has no fixed question count to show
+         a percentage of. No timers either — Regular Quiz is deliberately
+         untimed; a non-functional clock here would just be misleading. *@
+    <div class="quiz-header">
+        <div class="progress-info">
+            <span class="question-counter">
+                @if (ViewIndex is not null)
+                {
+                    <text>Reviewing question <strong>@DisplayedQuestionNumber</strong> · Score: <strong>@CorrectCount / @TotalCount</strong></text>
+                }
+                else
+                {
+                    <text>Question <strong>@DisplayedQuestionNumber</strong> · Score: <strong>@CorrectCount / @TotalCount</strong></text>
+                }
+            </span>
+        </div>
+        <button type="button" class="quit-btn" @onclick="HandleQuit">
+            Quit Quiz
+        </button>
+    </div>
+
+    @if (ViewIndex is null && IsLoadingQuestion)
+    {
+        <div class="question loading">
+            <div class="spinner"></div>
+            <p class="loading-text">Loading question…</p>
+        </div>
+    }
+    else if (ViewIndex is null && Current is not null && Current.Topic == "Setup needed")
+    {
+        @* → Distinct from a real question on purpose — this used to render
+             through the exact same choice-list markup as a real question,
+             with ErrorQuestion's single "OK" choice pre-selectable and
+             "Submit"-able, which silently sent the error placeholder itself
+             off to be graded instead of retrying generation. Current.Explanation
+             (previously never shown here) carries the actual reason from
+             ClaudeQuestionToolParser.DescribeFailure — surfacing it means a
+             failure is diagnosable without checking the server console. *@
+        <div class="question load-error">
+            <p class="topic-tag">Setup needed</p>
+            <p class="prompt">@Current.Prompt</p>
+            <p class="load-error-detail">@Current.Explanation</p>
+        </div>
+
+        @if (LastQuestionMs is not null)
+        {
+            <p class="timing">Attempt took @LastQuestionMs ms using @CurrentModelLabel</p>
+        }
+    }
+    else if (DisplayedQuestion is not null)
+    {
+        @* → One question card serves BOTH the live question and, while
+             browsing history (ViewIndex not null), a past attempt — driven
+             by DisplayedQuestion/DisplayedAnswer/DisplayedResult rather than
+             two separately-mounted instances the way TimedQuiz's QuizRunner
+             does it. Safe here because nothing in this card lives in child-
+             component state that a remount would lose — SelectedAnswer,
+             results, and cross-out marks are all top-level fields on this
+             page already, so a single conditional block re-rendering from
+             different data sources (live fields vs. an Attempts[] entry)
+             doesn't risk losing anything the way an actual unmount would.
+             History is read-only: no editing a past answer here, no
+             cross-out buttons — see IsHistoryReadOnly. DisplayedQuestion is
+             accessed directly (not captured to a local first) even though
+             it's a computed property whose "is not null" check up in the
+             enclosing else-if doesn't technically narrow it for the
+             compiler — same non-issue as TimedQuiz.razor's own
+             Attempts[ViewIndex.Value].Question pattern: at worst a harmless
+             CS8602 warning, not a build error. *@
+        <div class="question">
+            <div class="question-header">
+                @if (!string.IsNullOrEmpty(DisplayedQuestion!.Difficulty))
+                {
+                    <span class="difficulty-badge @DisplayedQuestion!.Difficulty!.ToLower()">@DisplayedQuestion!.Difficulty</span>
+                }
+                <span class="question-type">@(DisplayedQuestion!.Choices.Count > 0 ? "Multiple Choice" : "Short Answer")</span>
+            </div>
+            <p class="topic-tag">@DisplayedQuestion!.Topic</p>
+            <p class="prompt">@DisplayedQuestion!.Prompt</p>
+
+            @if (DisplayedQuestion!.Choices.Count > 0)
+            {
+                <div class="options-container">
+                    @foreach (var choice in DisplayedQuestion!.Choices)
+                    {
+                        var isSelected = DisplayedAnswer == choice;
+                        var eliminated = !IsHistoryReadOnly && LiveEliminatedChoices.Contains(choice);
+                        <div class="option-row">
+                            <button type="button" class="option-button @(isSelected ? "selected" : "") @(eliminated ? "eliminated" : "")"
+                                    disabled="@(eliminated || IsHistoryReadOnly)"
+                                    @onclick="() => SelectLiveChoice(choice)">
+                                <span class="option-radio">
+                                    @if (isSelected)
+                                    {
+                                        <span class="selected-indicator">✓</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="radio-circle"></span>
+                                    }
+                                </span>
+                                <span class="option-text">@choice</span>
+                            </button>
+                            @if (!IsHistoryReadOnly)
+                            {
+                                <button type="button" class="eliminate-btn" title="Cross out"
+                                        @onclick="() => ToggleEliminate(choice)">
+                                    @(eliminated ? "↺" : "✕")
+                                </button>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <!-- Free-text question: no choices to cross out -->
+                <textarea class="freetext-answer" placeholder="Type your answer…"
+                          value="@DisplayedAnswer"
+                          @oninput="HandleFreeTextInput"
+                          readonly="@(IsHistoryReadOnly || LiveResult is not null)"></textarea>
+            }
+        </div>
+
+        @if (DisplayedResult is not null)
+        {
+            <div class="result @DisplayedResultCssClass">
+                <strong>@DisplayedResultLabel</strong>
+                <p>@DisplayedResult!.Explanation</p>
+            </div>
+
+            @if (ViewIndex is null)
+            {
+                @if (LastGradeMs is not null)
+                {
+                    <p class="timing">Graded in @LastGradeMs ms using @CurrentModelLabel@TokenSuffix(DisplayedResult!.InputTokens, DisplayedResult!.OutputTokens)</p>
+                }
+
+                @if (IsRecommending)
+                {
+                    <p class="loading-text">Thinking about what's next…</p>
+                }
+                else if (Recommendation is not null && Settings.RecommendationMode != "Disabled")
+                {
+                    <div class="recommendation">
+                        <p class="recommendation-label">Suggested next</p>
+                        <p><strong>@Recommendation.Topic</strong> · @Recommendation.Difficulty — @Recommendation.Reason</p>
+                        <button type="button" @onclick="ApplyRecommendation">Use this</button>
+                        @if (LastRecommendationMs is not null)
+                        {
+                            <p class="timing">Recommended in @LastRecommendationMs ms using @CurrentModelLabel@TokenSuffix(Recommendation.InputTokens, Recommendation.OutputTokens)</p>
+                        }
+                    </div>
+                }
+            }
+        }
+
+        @if (ViewIndex is null && LastQuestionMs is not null)
+        {
+            <p class="timing">Question generated in @LastQuestionMs ms using @CurrentModelLabel@TokenSuffix(Current?.InputTokens, Current?.OutputTokens)</p>
+        }
+    }
+
+    @* → Previous/Skip/Next — matches TimedQuiz.razor's .answer-nav-footer
+         exactly (same shared classes). Previous is always rendered, even
+         during a loading spinner or a "Setup needed" error, so a slow or
+         failed fetch never locks the student out of checking earlier
+         answers — same reasoning TimedQuiz.razor documents for its own
+         footer. Skip/Next only appear once there's actually a question
+         (live or historical) to act on. *@
+    <div class="answer-nav-footer">
+        <button type="button" class="nav-btn" @onclick="HandlePrevious"
+                disabled="@(!CanGoPrevious || IsBusy)" title="Previous question">
+            ← Previous
+        </button>
+        @if (DisplayedQuestion is not null)
+        {
+            <div class="answer-nav-footer-right">
+                @if (ViewIndex is null && LiveResult is null)
+                {
+                    @* → Skip-ahead — before grading, Next (grading) was the
+                         ONLY way to move forward, and it stays disabled until
+                         an answer is picked, so there was no way to move past
+                         a question you don't want to answer. Doesn't touch
+                         TopicStats/CorrectCount/TotalCount or Attempts —
+                         skipping isn't graded, so it can't cost (or help)
+                         your score, and it never shows up in Previous/Next
+                         history. *@
+                    <button type="button" class="btn-skip" @onclick="LoadQuestion"
+                            disabled="@IsBusy"
+                            title="Move on without answering this one">
+                        Skip →
+                    </button>
+                }
+                <button type="button" class="btn-next" @onclick="HandleNext" disabled="@(!CanClickNext || IsBusy)">
+                    @NextButtonLabel
+                </button>
+            </div>
+        }
+    </div>
+
+    @if (SessionCalls > 0)
+    {
+        <p class="session-stats">
+            Session: @SessionCalls API calls · @SessionElapsedMs ms total (@(SessionElapsedMs / SessionCalls) ms avg) ·
+            @(SessionInputTokens + SessionOutputTokens) tokens total (@SessionInputTokens in / @SessionOutputTokens out)
+        </p>
+    }
+</div>
+
+@code {
+    private QuizQuestion? Current;
+
+    // → The live question's current pick and grade — renamed from
+    // SelectedAnswer/Result to make the live/history split explicit now
+    // that a second data source (Attempts, via ViewIndex) can also drive
+    // what's on screen. Same fields as before, just Live-prefixed.
+    private string? LiveSelectedAnswer;
+    private GradeResult? LiveResult;
+
+    private bool IsLoadingQuestion;
+    private bool IsGrading;
+    private int CorrectCount;
+    private int TotalCount;
+    private long? LastQuestionMs;
+    private long? LastGradeMs;
+
+    // → Previous/Next navigation across already-graded questions this
+    // session — same ViewIndex pattern as TimedQuiz.razor (null = live,
+    // else a 0-based index into Attempts), reusing TimedQuizLogic's pure
+    // index math directly since it's already generic (just ints/bools, no
+    // TimedQuiz-specific types). Unlike TimedQuiz, history here is
+    // read-only — no editing a past answer, just reviewing what you
+    // answered and whether it was correct. QuestionAttempt is the same
+    // model TimedQuiz uses; TimeSpentMs/MarkedForReview are unused by
+    // Regular Quiz and always default (0 / false).
+    private List<QuestionAttempt> Attempts = new();
+    private int? ViewIndex;
+
+    private bool IsHistoryReadOnly => ViewIndex is not null;
+
+    private QuizQuestion? DisplayedQuestion =>
+        ViewIndex is not null ? Attempts[ViewIndex.Value].Question : Current;
+
+    private string DisplayedAnswer =>
+        ViewIndex is not null ? Attempts[ViewIndex.Value].UserAnswer : (LiveSelectedAnswer ?? "");
+
+    private GradeResult? DisplayedResult =>
+        ViewIndex is not null ? Attempts[ViewIndex.Value].Grade : LiveResult;
+
+    private string DisplayedResultCssClass => DisplayedResult?.Outcome switch
+    {
+        GradeOutcome.Correct => "correct",
+        GradeOutcome.Incorrect => "incorrect",
+        GradeOutcome.GradingFailed => "failed",
+        _ => "",
+    };
+
+    private string DisplayedResultLabel => DisplayedResult?.Outcome switch
+    {
+        GradeOutcome.Correct => "Correct",
+        GradeOutcome.Incorrect => "Not quite",
+        GradeOutcome.GradingFailed => "Grading failed",
+        _ => "",
+    };
+
+    // → "Question N" — TotalCount already tracks exactly "how many questions
+    // have been graded so far," the same trigger point Attempts.Add fires
+    // at (see HandleNext's live/graded branch), so it's reused directly
+    // rather than deriving a second counter from Attempts.Count.
+    private int DisplayedQuestionNumber =>
+        ViewIndex is not null ? Attempts[ViewIndex.Value].QuestionNumber : TotalCount + 1;
+
+    private bool IsBusy => IsLoadingQuestion || IsGrading;
+
+    private bool CanGoPrevious => TimedQuizLogic.CanGoPrevious(ViewIndex, Attempts.Count);
+    private bool CanGoNext => TimedQuizLogic.CanGoNext(ViewIndex);
+    private bool IsAtLastHistoryEntry => TimedQuizLogic.IsAtLastHistoryEntry(ViewIndex, Attempts.Count);
+
+    // → Whether Next is clickable. Live, it doubles as "is there anything to
+    // act on" — either grade the picked answer, or (once LiveResult is set)
+    // advance to a new question. Browsing history, it's always clickable
+    // when there's somewhere to go, same as TimedQuiz.
+    private bool CanClickNext => ViewIndex is null
+        ? (LiveResult is not null || !string.IsNullOrWhiteSpace(LiveSelectedAnswer))
+        : CanGoNext;
+
+    // → "Submit" is gone — the same button now does double duty exactly the
+    // way TimedQuiz.razor's Next does: first click (no LiveResult yet)
+    // grades and shows feedback on this question; second click advances.
+    // Matches TimedQuiz's exact wording rather than switching to "Next
+    // Question" once graded, since it's still the same action from the
+    // student's point of view (click Next to move on).
+    private string NextButtonLabel
+    {
+        get
+        {
+            if (IsGrading) return "Grading…";
+            if (ViewIndex is null) return "Next →";
+            return IsAtLastHistoryEntry ? "Back to current →" : "Next →";
+        }
+    }
+
+    // Prompt and Context Engineering (CCDV-F, 11.0%): the app has no server-
+    // side session state Claude can read, so "don't repeat yourself" has to be
+    // fed back in as prompt content — a rolling list of the last few prompts
+    // actually shown, replayed into GetQuestionAsync so ClaudeQuizProvider can
+    // tell Claude what to avoid. Capped per topic so the prompt doesn't grow
+    // unbounded over a long study session.
+    //
+    // → Keyed by topic, add/lookup handled by RecentHistoryLogic (pure,
+    // directly unit-tested in RecentHistoryLogicTests.cs — see that class'
+    // header comment for the actual bug this scoping fixed: a single list
+    // shared across every topic used to let playing one topic (e.g. "Claude
+    // Certified Architect") inflate another's question length, since a
+    // longer/less-relevant avoid-list pushes Claude toward longer,
+    // more-elaborate questions to differentiate against it — see
+    // BuildAvoidClause's own comment in ClaudeQuizProvider). The cap itself
+    // is now Settings.AvoidListSize (student-configurable in Settings)
+    // rather than a fixed constant — see QuizSettings.AvoidListSize's doc
+    // comment for the tradeoff a bigger number actually means.
+    private Dictionary<string, List<string>> RecentPromptsByTopic = new();
+
+    // Tools and MCPs (CCDV-F, 10.6%): track the format of recent questions so
+    // the app can nudge Claude toward formats it hasn't been using as much,
+    // without any server-side state — the caller replays back the actual
+    // recent history so the implementation can self-correct. Same shape and
+    // per-topic scoping as RecentPromptsByTopic, but not persisted to
+    // localStorage (resets each page load) — a stale format nudge left over
+    // from a previous session is low-stakes enough not to bother persisting.
+    private Dictionary<string, List<bool>> RecentFormatsByTopic = new();
+
+    private IReadOnlyList<string> CurrentTopicRecentPrompts =>
+        RecentHistoryLogic.ForTopic(RecentPromptsByTopic, Settings.Topic);
+
+    private IReadOnlyList<bool> CurrentTopicRecentFormats =>
+        RecentHistoryLogic.ForTopic(RecentFormatsByTopic, Settings.Topic);
+
+    // Agents and Workflows (CCDV-F, 14.7%): per-topic running score, kept only
+    // in memory for this session — the input side of the routing decision.
+    // IQuizPlanner reads a snapshot of this after every grade to decide what
+    // to recommend next.
+    private readonly Dictionary<string, (int Correct, int Total)> TopicStats = new();
+    private NextStepRecommendation? Recommendation;
+    private bool IsRecommending;
+    private long? LastRecommendationMs;
+
+    // Session-wide aggregate, shown outside the question card — the per-call
+    // lines above answer "was this one fast/expensive?"; this answers "what's
+    // this session actually costing me?" Both generation and grading calls
+    // count toward it. Model Selection and Optimization (CCDV-F, 16.8%).
+    private int SessionCalls;
+    private long SessionElapsedMs;
+    private int SessionInputTokens;
+    private int SessionOutputTokens;
+
+    // → Per-question max_tokens budget, same idea as TimedQuiz.razor's
+    // CurrentMaxTokens/InitialMaxTokens: ratchets up (never resets) whenever
+    // a fetch comes back truncated, so an early truncation doesn't keep
+    // repeating on every later question.
+    private const int InitialMaxTokens = 700;
+    private int CurrentMaxTokens = InitialMaxTokens;
+
+    private string CurrentModelLabel => Settings.Model;
+
+    private static string TokenSuffix(int? inputTokens, int? outputTokens) =>
+        inputTokens is null || outputTokens is null
+            ? ""
+            : $" · {inputTokens}/{outputTokens} tokens (in/out)";
+
+    private void RecordCall(long elapsedMs, int? inputTokens, int? outputTokens)
+    {
+        SessionCalls++;
+        SessionElapsedMs += elapsedMs;
+        SessionInputTokens += inputTokens ?? 0;
+        SessionOutputTokens += outputTokens ?? 0;
+    }
+
+    // Process-of-elimination scratch marks — purely visual/local to the live
+    // question, reset every time a new one loads. Doesn't affect grading.
+    // Not shown (or tracked per-attempt) while browsing history — see
+    // IsHistoryReadOnly.
+    private readonly HashSet<string> LiveEliminatedChoices = new();
+
+    // → OnInitializedAsync: load persisted state and initial question
+    protected override async Task OnInitializedAsync()
+    {
+        // Load RecentPromptsByTopic from browser localStorage to maintain each
+        // topic's avoid-list across Kestrel restarts and browser sessions. Prevents the same questions
+        // from being generated repeatedly on app restart.
+        try
+        {
+            var stored = await JS.InvokeAsync<string>("localStorage.getItem", "recentPromptsByTopic");
+            if (!string.IsNullOrEmpty(stored))
+            {
+                var byTopic = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, List<string>>>(stored);
+                if (byTopic != null)
+                {
+                    RecentPromptsByTopic = byTopic.ToDictionary(
+                        kv => kv.Key,
+                        kv => kv.Value.TakeLast(Settings.AvoidListSize).ToList());
+                }
+            }
+        }
+        catch
+        {
+            // localStorage not available (private window, etc.), or old-format
+            // data under this key — just continue with empty per-topic lists.
+        }
+
+        // Load the first question immediately on page init
+        await LoadQuestion();
+    }
+
+    // → LoadQuestion: fetch next question from provider
+    private async Task LoadQuestion()
+    {
+        IsLoadingQuestion = true;
+        Current = null;
+        LiveSelectedAnswer = null;
+        LiveResult = null;
+        LastQuestionMs = null;
+        LastGradeMs = null;
+        Recommendation = null;
+        LastRecommendationMs = null;
+        LiveEliminatedChoices.Clear();
+
+        StateHasChanged();
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var preferredFormat = StringToQuestionFormat(Settings.PreferredFormat);
+        Current = await QuizProvider.GetQuestionAsync(Settings.Topic, Settings.Model, Settings.DifficultyFilter, CurrentTopicRecentPrompts, CurrentTopicRecentFormats, preferredFormat, CurrentMaxTokens);
+
+        if (Current.WasTruncated)
+        {
+            CurrentMaxTokens = TimedQuizLogic.BumpMaxTokens(CurrentMaxTokens);
+            Current = await QuizProvider.GetQuestionAsync(Settings.Topic, Settings.Model, Settings.DifficultyFilter, CurrentTopicRecentPrompts, CurrentTopicRecentFormats, preferredFormat, CurrentMaxTokens);
+        }
+
+        stopwatch.Stop();
+        LastQuestionMs = stopwatch.ElapsedMilliseconds;
+        RecordCall(LastQuestionMs.Value, Current.InputTokens, Current.OutputTokens);
+
+        if (Current.Topic != "Setup needed")
+        {
+            RecentPromptsByTopic = RecentHistoryLogic.AddToTopic(RecentPromptsByTopic, Current.Topic, Current.Prompt, Settings.AvoidListSize);
+            await SaveRecentPromptsToLocalStorage();
+
+            RecentFormatsByTopic = RecentHistoryLogic.AddToTopic(RecentFormatsByTopic, Current.Topic, Current.Choices.Count > 0, Settings.AvoidListSize);
+        }
+
+        IsLoadingQuestion = false;
+    }
+
+    private void SelectLiveChoice(string choice)
+    {
+        if (ViewIndex is not null) return;
+        LiveSelectedAnswer = choice;
+    }
+
+    private void HandleFreeTextInput(ChangeEventArgs e)
+    {
+        if (ViewIndex is null && LiveResult is null)
+            LiveSelectedAnswer = (string)e.Value!;
+    }
+
+    private void ToggleEliminate(string choice)
+    {
+        if (ViewIndex is not null) return;
+
+        if (!LiveEliminatedChoices.Remove(choice))
+            LiveEliminatedChoices.Add(choice);
+
+        if (LiveSelectedAnswer == choice && LiveEliminatedChoices.Contains(choice))
+            LiveSelectedAnswer = null;
+    }
+
+    private void GoToPreviousView() => ViewIndex = TimedQuizLogic.GetPreviousViewIndex(ViewIndex, Attempts.Count);
+    private void GoToNextView() => ViewIndex = TimedQuizLogic.GetNextViewIndex(ViewIndex, Attempts.Count);
+
+    private void HandlePrevious() => GoToPreviousView();
+
+    private void HandleQuit() => Nav.NavigateTo("/");
+
+    // → Next: does two different jobs depending on ViewIndex/LiveResult,
+    // unified into one button — "Submit" is gone, this is what replaces it.
+    //   - Live, ungraded (LiveResult null): grades LiveSelectedAnswer and
+    //     shows the result/explanation/suggestion on THIS SAME question —
+    //     same immediate-feedback contract Submit always had, just renamed.
+    //   - Live, already graded: pushes the graded question into Attempts
+    //     history, then loads a new question.
+    //   - History (ViewIndex not null): read-only, just steps forward — or,
+    //     from the last historical entry, back to the live question.
+    private async Task HandleNext()
+    {
+        if (ViewIndex is null)
+        {
+            if (LiveResult is null)
+            {
+                if (string.IsNullOrWhiteSpace(LiveSelectedAnswer)) return;
+                await GradeLiveAnswer();
+            }
+            else
+            {
+                await AdvanceFromLive();
+            }
+        }
+        else
+        {
+            GoToNextView();
+        }
+    }
+
+    // → First half of what used to be Submit(): grade the live pick and
+    // show feedback, without advancing yet.
+    private async Task GradeLiveAnswer()
+    {
+        if (Current is null || LiveSelectedAnswer is null) return;
+
+        IsGrading = true;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        LiveResult = await QuizProvider.GradeAsync(Current, LiveSelectedAnswer, Settings.Model);
+        stopwatch.Stop();
+        LastGradeMs = stopwatch.ElapsedMilliseconds;
+        RecordCall(LastGradeMs.Value, LiveResult.InputTokens, LiveResult.OutputTokens);
+        IsGrading = false;
+
+        // Eval, Testing, and Debugging (CCDV-F, 2.6%): a truncated or
+        // unparseable grade used to silently count as "incorrect" — it
+        // touched the score and TopicStats exactly like a real wrong answer.
+        // GradeResult.Outcome now says explicitly when grading itself failed,
+        // so that case skips the score, skips feeding a bad data point into
+        // TopicStats, and skips triggering a recommendation call that would
+        // just be reasoning off the same numbers as last time.
+        if (LiveResult.Outcome == GradeOutcome.GradingFailed)
+            return;
+
+        TotalCount++;
+        if (LiveResult.IsCorrect) CorrectCount++;
+
+        TopicStats.TryGetValue(Current.Topic, out var stats);
+        TopicStats[Current.Topic] = (stats.Correct + (LiveResult.IsCorrect ? 1 : 0), stats.Total + 1);
+
+        await Recommend();
+    }
+
+    // → Second half of what used to be Submit()'s "Result is not null"
+    // branch: record the just-graded question into history, then load the
+    // next one. TotalCount was already incremented in GradeLiveAnswer above
+    // (whether this was the 1st, 2nd, 3rd... graded question), so it's
+    // reused directly as this attempt's QuestionNumber rather than deriving
+    // a second counter from Attempts.Count.
+    private async Task AdvanceFromLive()
+    {
+        if (Current is not null && LiveResult is not null)
+        {
+            Attempts.Add(new QuestionAttempt
+            {
+                QuestionNumber = TotalCount,
+                Question = Current,
+                UserAnswer = LiveSelectedAnswer ?? "",
+                Grade = LiveResult,
+                TimeSpentMs = 0,
+                MarkedForReview = false
+            });
+        }
+
+        await LoadQuestion();
+    }
+
+    // Agents and Workflows (CCDV-F, 14.7%): fires after every grade based on
+    // Settings.RecommendationMode. When Disabled, skips the recommendation call
+    // entirely. When StayOnTopic, passes only the current topic to the planner.
+    // When Auto, passes full history for unrestricted routing. This demonstrates
+    // that workflows can be flexible — the same IQuizPlanner implementation
+    // behaves differently based on what input the caller provides (or chooses
+    // not to call at all).
+    // → Recommend: get routing decision from planner (if not disabled)
+    private async Task Recommend()
+    {
+        // → Recommend is only ever called from GradeLiveAnswer(), after its
+        // own "if (Current is null ...) return;" guard — but that narrowing
+        // doesn't carry across the method boundary, so the compiler still
+        // sees Current as possibly-null below (CS8602). Re-checking here
+        // makes that explicit instead of asserting it away with "!".
+        if (Current is null) return;
+
+        var mode = Settings.RecommendationMode;
+
+        if (mode == "Disabled")
+        {
+            Recommendation = null;
+            return;
+        }
+
+        IsRecommending = true;
+
+        var history = mode == "Suggested"
+            ? new List<StudyAI.Models.TopicPerformance>
+            {
+                TopicStats
+                    .Where(kv => kv.Key == Current.Topic)
+                    .Select(kv => new StudyAI.Models.TopicPerformance(kv.Key, kv.Value.Correct, kv.Value.Total))
+                    .FirstOrDefault() ?? new StudyAI.Models.TopicPerformance(Current.Topic, 0, 0)
+            }
+            : TopicStats
+                .Select(kv => new StudyAI.Models.TopicPerformance(kv.Key, kv.Value.Correct, kv.Value.Total))
+                .ToList();
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var restrictToCurrentTopic = mode == "Suggested";
+        // → Call planner with history (filtered or full, depending on mode) using centralized model setting.
+        // Settings.DifficultyFilter is passed as the baseline so the recommendation
+        // respects whatever difficulty the student already configured (e.g. Hard)
+        // instead of always drifting toward Medium — see
+        // ClaudeQuizPlanner.BuildProgressionGuidance for what this actually changes.
+        Recommendation = await QuizPlanner.RecommendNextAsync(history, Settings.Model, restrictToCurrentTopic, Settings.DifficultyFilter);
+        stopwatch.Stop();
+        LastRecommendationMs = stopwatch.ElapsedMilliseconds;
+        RecordCall(LastRecommendationMs.Value, Recommendation.InputTokens, Recommendation.OutputTokens);
+
+        IsRecommending = false;
+    }
+
+    // → ApplyRecommendation: accept suggested topic/difficulty and load new question
+    private async Task ApplyRecommendation()
+    {
+        if (Recommendation is null) return;
+
+        // Defensive — the recommendation block only ever renders while
+        // ViewIndex is null (see the markup above), but this keeps
+        // ApplyRecommendation correct even if that ever changes.
+        ViewIndex = null;
+
+        Settings.Topic = Recommendation.Topic;
+        // Update the Settings difficulty to match the recommendation
+        Settings.DifficultyFilter = NormalizeDifficulty(Recommendation.Difficulty);
+        await LoadQuestion();
+    }
+
+    // Claude's free-text difficulty won't always match the setting's casing
+    // exactly (e.g. "medium" vs "Medium") — normalized here so settings
+    // reflect the intended value.
+    private static string NormalizeDifficulty(string value)
+    {
+        var validDifficulties = new[] { "Easy", "Medium", "Hard" };
+        return validDifficulties.FirstOrDefault(d => string.Equals(d, value, StringComparison.OrdinalIgnoreCase)) ?? "Medium";
+    }
+    // → SaveRecentPromptsToLocalStorage: persist avoid-list for question variability
+    private async Task SaveRecentPromptsToLocalStorage()
+    {
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(RecentPromptsByTopic);
+            await JS.InvokeVoidAsync("localStorage.setItem", "recentPromptsByTopic", json);
+        }
+        catch
+        {
+            // localStorage not available — continue silently (private window, etc.)
+        }
+    }
+
+    private static StudyAI.Models.QuestionFormat StringToQuestionFormat(string format) => format switch
+    {
+        "MultipleChoice" => StudyAI.Models.QuestionFormat.MultipleChoice,
+        "ShortAnswer" => StudyAI.Models.QuestionFormat.ShortAnswer,
+        _ => StudyAI.Models.QuestionFormat.Any
+    };
+}
+
+<style>
+    /* → Quiz page styling. .quiz-header/.progress-info/.question-counter/
+       .nav-btn/.quit-btn/.answer-nav-footer/.question-header/
+       .difficulty-badge/.question-type/.options-container/.option-row/
+       .option-button (+ states)/.option-radio/.selected-indicator/
+       .radio-circle/.option-text/.eliminate-btn/.timing all now live in
+       app.css — see its "Shared quiz-runner visual language" comment —
+       this page just uses those shared classes so it matches TimedQuiz.razor
+       exactly instead of carrying its own slightly-different copies. */
+
+    .quiz {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 0 1rem;
+    }
+
+    .quiz h1 {
+        margin-bottom: 1rem;
+    }
+
+    /* → Secondary — outlined rather than the filled .btn-next uses, so Skip
+       reads as the lesser action next to Next, not a second equally-weighted
+       choice. Regular-Quiz-only (TimedQuiz has no skip concept — Next there
+       always requires an answer). */
+    .btn-skip {
+        background: none;
+        color: #0066cc;
+        border: 2px solid #cfe2f5;
+        padding: 0.55rem 1.4rem;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+
+    .btn-skip:hover:not(:disabled) {
+        background: #f0f6ff;
+        border-color: #0066cc;
+    }
+
+    .btn-skip:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+    /* → Setup-needed / retryable error state — same .question card shape as
+       a real question, with a red-tinted left border so it doesn't get
+       confused for one at a glance. Scoped under .question.load-error
+       (rather than a bare .load-error-detail) so it doesn't collide with
+       TimedQuiz.razor's own differently-styled .load-error-card
+       .load-error-detail — same non-isolated-style-block issue documented
+       throughout this file, fixed here by scoping instead of consolidating,
+       since the two are genuinely different-looking cards by design. */
+    .question.load-error {
+        border-left: 3px solid #e0342d;
+    }
+
+    .question.load-error .load-error-detail {
+        font-size: 0.85rem;
+        color: #721c24;
+        background: #fdecec;
+        border: 1px solid #f3b8b8;
+        border-radius: 6px;
+        padding: 0.6rem 0.75rem;
+        margin: 0;
+    }
+</style>

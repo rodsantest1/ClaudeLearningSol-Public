@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Claude Quiz Generator and Grader — actual architecture</title>
+<style>
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --border:         rgba(11,11,11,0.14);
+    --border-strong:  rgba(11,11,11,0.28);
+    --gridline:       #e1e0d9;
+    --auto:           #2a78d6;   /* categorical slot 1 */
+    --auto-bg:        #eaf1fb;
+    --forced:         #eb6834;   /* categorical slot 2 */
+    --forced-bg:      #fdece4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --border:         rgba(255,255,255,0.16);
+      --border-strong:  rgba(255,255,255,0.32);
+      --gridline:       #2c2c2a;
+      --auto:           #3987e5;
+      --auto-bg:        #182636;
+      --forced:         #d95926;
+      --forced-bg:      #33211a;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --border:         rgba(255,255,255,0.16);
+    --border-strong:  rgba(255,255,255,0.32);
+    --gridline:       #2c2c2a;
+    --auto:           #3987e5;
+    --auto-bg:        #182636;
+    --forced:         #d95926;
+    --forced-bg:      #33211a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+  }
+  .viz-root {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 40px 32px 32px;
+    background: var(--surface-1);
+  }
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    margin: 0 0 4px;
+  }
+  .subtitle {
+    font-size: 14.5px;
+    color: var(--text-secondary);
+    margin: 0 0 30px;
+    max-width: 900px;
+    line-height: 1.5;
+  }
+
+  /* Callers — two entry points now, drawn the same way GetQuestionAsync's
+     two tools are drawn below (a paired row), so the doc's own visual
+     vocabulary is what tells you these are siblings. */
+  .caller-row {
+    display: flex;
+    gap: 16px;
+  }
+  .caller-col {
+    flex: 1;
+    display: flex;
+  }
+  .caller-box {
+    flex: 1;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 14px 20px;
+    background: var(--surface-1);
+  }
+  .caller-box .label {
+    font-size: 15.5px;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .caller-box .mode-tag {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+  .caller-box .desc {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    margin-top: 9px;
+    line-height: 1.5;
+  }
+
+  .arrow-down {
+    text-align: center;
+    font-size: 26px;
+    color: var(--text-muted);
+    line-height: 1;
+    margin: 6px 0;
+    user-select: none;
+  }
+  .columns {
+    display: flex;
+    gap: 22px;
+    align-items: stretch;
+    margin-top: 4px;
+  }
+  .col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .call-box {
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: center;
+    background: var(--surface-1);
+  }
+  .call-box .name {
+    font-size: 14.5px;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .call-box .trigger {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+
+  /* Which caller(s) actually reach this call — the fact that changed when
+     TimedQuiz.razor was added. Reuses the pill shape .badge already uses,
+     in a neutral tone so it reads as "who", not "how" (that's what the
+     blue/orange badges below still mean). */
+  .caller-tags {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .caller-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.1px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    background: var(--page);
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .tool-row {
+    display: flex;
+    gap: 8px;
+  }
+  .tool-box {
+    flex: 1;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 10px 8px;
+    text-align: center;
+    font-size: 12.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--surface-1);
+    line-height: 1.35;
+  }
+  .badge {
+    margin: 8px auto 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge-wrap { text-align: center; }
+  .badge.auto   { color: var(--auto);   background: var(--auto-bg); }
+  .badge.forced { color: var(--forced); background: var(--forced-bg); }
+  .badge .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block;
+  }
+  .badge.auto .dot   { background: var(--auto); }
+  .badge.forced .dot { background: var(--forced); }
+  .api-box {
+    border: 1.5px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 700;
+    background: var(--surface-1);
+  }
+  .api-box .sub {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin-top: 2px;
+  }
+  .footer {
+    margin-top: 30px;
+    padding-top: 18px;
+    border-top: 1px solid var(--gridline);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .legend {
+    display: flex;
+    gap: 22px;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .legend-item .dot {
+    width: 10px; height: 10px; border-radius: 50%; flex: none;
+  }
+  .legend-item .dot.auto   { background: var(--auto); }
+  .legend-item .dot.forced { background: var(--forced); }
+  .legend-item .caller-tag { margin: 0; }
+  .note {
+    font-size: 12px;
+    color: var(--text-muted);
+    max-width: 760px;
+    line-height: 1.6;
+  }
+  .note p { margin: 0 0 8px; }
+  .note p:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+  <div class="viz-root">
+    <h1>Claude Quiz Generator and Grader — actual architecture</h1>
+    <p class="subtitle">
+      Two entry points now, not one — Quiz.razor (untimed practice) and TimedQuiz.razor
+      (timed exam simulation) — but still three separate calls, not one agent freely
+      choosing among four tools. Both callers share GetQuestionAsync and GradeAsync;
+      only Quiz.razor also calls RecommendNextAsync, since timed mode has no adaptive
+      routing. Only question-generation actually lets Claude pick a tool — grading and
+      recommending-next each offer exactly one tool, forced.
+    </p>
+
+    <div class="caller-row">
+      <div class="caller-col">
+        <div class="caller-box">
+          <div class="label">Quiz.razor</div>
+          <div class="mode-tag">Practice mode</div>
+          <div class="desc">Untimed, student-paced study. Requests a question, submits an answer, and can ask what to study next — the only caller that reads session performance and calls RecommendNextAsync.</div>
+        </div>
+      </div>
+      <div class="caller-col">
+        <div class="caller-box">
+          <div class="label">TimedQuiz.razor</div>
+          <div class="mode-tag">Timed exam mode</div>
+          <div class="desc">Fixed question count on a running clock, simulating the real exam. Requests questions and grades answers through the exact same two calls as practice mode — never calls RecommendNextAsync.</div>
+        </div>
+      </div>
+    </div>
+    <div class="arrow-down">&#8595;</div>
+
+    <div class="columns">
+      <div class="col">
+        <div class="call-box">
+          <div class="name">GetQuestionAsync</div>
+          <div class="trigger">user requests a question</div>
+          <div class="caller-tags">
+            <span class="caller-tag">Quiz.razor</span>
+            <span class="caller-tag">TimedQuiz.razor</span>
+          </div>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="tool-row">
+          <div class="tool-box">create_multiple_&#8203;choice_question</div>
+          <div class="tool-box">create_short_&#8203;answer_question</div>
+        </div>
+        <div class="badge-wrap">
+          <span class="badge auto"><span class="dot"></span>tool_choice: auto — Claude picks</span>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="api-box">Claude API<div class="sub">POST /v1/messages</div></div>
+      </div>
+
+      <div class="col">
+        <div class="call-box">
+          <div class="name">GradeAsync</div>
+          <div class="trigger">user submits an answer</div>
+          <div class="caller-tags">
+            <span class="caller-tag">Quiz.razor</span>
+            <span class="caller-tag">TimedQuiz.razor</span>
+          </div>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="tool-row">
+          <div class="tool-box">submit_grade</div>
+        </div>
+        <div class="badge-wrap">
+          <span class="badge forced"><span class="dot"></span>tool_choice: forced — no choice</span>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="api-box">Claude API<div class="sub">POST /v1/messages</div></div>
+      </div>
+
+      <div class="col">
+        <div class="call-box">
+          <div class="name">RecommendNextAsync</div>
+          <div class="trigger">user asks what to study next</div>
+          <div class="caller-tags">
+            <span class="caller-tag">Quiz.razor</span>
+          </div>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="tool-row">
+          <div class="tool-box">recommend_next</div>
+        </div>
+        <div class="badge-wrap">
+          <span class="badge forced"><span class="dot"></span>tool_choice: forced — no choice</span>
+        </div>
+        <div class="arrow-down">&#8595;</div>
+        <div class="api-box">Claude API<div class="sub">POST /v1/messages</div></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="legend">
+        <div class="legend-item"><span class="dot auto"></span>AUTO — Claude decides which tool to call</div>
+        <div class="legend-item"><span class="dot forced"></span>FORCED — the code names the one tool Claude must call</div>
+        <div class="legend-item"><span class="caller-tag">Quiz.razor</span>— which caller(s) actually reach this call</div>
+      </div>
+      <div class="note">
+        <p>All three "Claude API" boxes are the same endpoint — drawn separately because no single request ever carries more than one call's tools at once.</p>
+        <p>GetQuestionAsync's avoid-list (recent prompts + recent formats) now comes from whichever caller is asking — Quiz.razor and TimedQuiz.razor each feed back their own session history so Claude steers away from repeating itself, instead of one caller's history silently covering for the other's blind spot.</p>
+        <p>TimedQuiz.razor can also defer GradeAsync until the student clicks Finish Quiz, for questions marked for review — practice mode always grades immediately.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- Plain Microsoft.NET.Sdk (not .Web) doesn't carry the ASP.NET Core
+       shared framework's implicit Microsoft.Extensions.Configuration.*
+       packages the way StudyAI.csproj gets them for free — those need
+       explicit PackageReferences here. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- No duplicated logic — this project references StudyAI directly and
+       calls its real ClaudeQuizProvider/ClaudeQuestionToolParser/models, so
+       whatever it demonstrates is guaranteed to be the same code path the
+       actual app uses, not a simplified stand-in that could drift out of
+       sync with it. -->
+  <ItemGroup>
+    <ProjectReference Include="..\StudyAI\StudyAI.csproj" />
+  </ItemGroup>
+
+</Project>

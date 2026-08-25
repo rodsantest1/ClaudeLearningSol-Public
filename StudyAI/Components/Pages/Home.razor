@@ -1,0 +1,983 @@
+@page "/"
+@using StudyAI.Services
+@rendermode InteractiveServer
+@inject QuizSettings Settings
+@inject SettingsPersistence SettingsPersistence
+@inject IJSRuntime JS
+
+<PageTitle>StudyAI</PageTitle>
+
+<div class="home">
+    <div class="hero">
+        <h1>StudyAI</h1>
+        <p>A rudimentary exam trainer. Pick how you want to study.</p>
+        <button class="settings-btn" @onclick="ToggleSettingsPanel" title="Open settings">⚙️</button>
+    </div>
+
+    @* → Settings panel overlay. Shows prefetch toggle and other optimizations
+         the student can experiment with. Raised on top of mode cards with z-index. *@
+    @if (ShowSettingsPanel)
+    {
+        <div class="settings-overlay" @onclick="ToggleSettingsPanel"></div>
+        <div class="settings-panel">
+            <div class="settings-header">
+                <h2>Settings</h2>
+                <button class="close-btn" @onclick="ToggleSettingsPanel" title="Close">✕</button>
+            </div>
+
+            <div class="settings-content">
+                <div class="settings-group">
+                    <label class="settings-label-text">Model (applies to all quizzes)</label>
+                    <div class="settings-radio-group">
+                        <label class="settings-radio">
+                            <input type="radio" name="model" value="claude-haiku-4-5"
+                                   checked="@(Settings.Model == "claude-haiku-4-5")"
+                                   @onchange="e => HandleModelChange(e.Value?.ToString())" />
+                            <span>Haiku (fast)</span>
+                        </label>
+                        <label class="settings-radio">
+                            <input type="radio" name="model" value="claude-sonnet-4-5"
+                                   checked="@(Settings.Model == "claude-sonnet-4-5")"
+                                   @onchange="e => HandleModelChange(e.Value?.ToString())" />
+                            <span>Sonnet (quality)</span>
+                        </label>
+                    </div>
+                    <p class="settings-hint">Feel the speed/quality tradeoff. Haiku is faster but less capable.</p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label-text">Difficulty (applies to all quizzes)</label>
+                    <select @onchange="HandleDifficultyChange" class="settings-select">
+                        <option value="Easy" selected="@(Settings.DifficultyFilter == "Easy")">Easy</option>
+                        <option value="Medium" selected="@(Settings.DifficultyFilter == "Medium")">Medium</option>
+                        <option value="Hard" selected="@(Settings.DifficultyFilter == "Hard")">Hard</option>
+                        <option value="Mixed" selected="@(Settings.DifficultyFilter == "Mixed")">Mixed</option>
+                    </select>
+                    <p class="settings-hint">Choose question difficulty. Mixed randomly selects from all three.</p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label-text">Questions per Timed Quiz</label>
+                    <input type="number" min="5" max="20" @onchange="HandleNumQuestionsChange"
+                           value="@Settings.NumQuestions" class="settings-input" />
+                    <p class="settings-hint">Number of questions in a Timed Quiz (5-20).</p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label">
+                        <input type="checkbox"
+                               checked="@Settings.PrefetchNextQuestion"
+                               @onchange="HandlePrefetchChange"
+                               class="settings-checkbox" />
+                        <span>Prefetch next question (Timed Quiz)</span>
+                    </label>
+                    <p class="settings-hint">
+                        When enabled, the next question loads while you're answering. Faster but more API calls.
+                    </p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label-text">Topic (applies to all quizzes)</label>
+                    <select @onchange="HandleTopicChange" class="settings-select">
+                        <option value="" selected="@(Settings.Topic == "")">Any topic</option>
+                        @foreach (var t in Settings.Topics)
+                        {
+                            <option value="@t" selected="@(Settings.Topic == t)">@t</option>
+                        }
+                    </select>
+                    <p class="settings-hint">Focus on a specific topic or mix from all.</p>
+                </div>
+
+                @* → Manage Topics: CRUD over Settings.Topics, the list the dropdown
+                     above is built from. Kept as its own group rather than folded
+                     into the dropdown itself, so picking a topic to study and
+                     editing the topic list are two clearly separate actions — no
+                     risk of an edit/delete click also changing what's selected.
+                     Delete uses the browser's native confirm() (same IJSRuntime
+                     pattern Quiz.razor already uses for localStorage) instead of a
+                     custom modal — a second overlay stacked on top of the settings
+                     panel would be more UI than a "are you sure" needs. *@
+                <div class="settings-group">
+                    <label class="settings-label-text">Manage Topics</label>
+                    <div class="topics-list">
+                        @foreach (var t in Settings.Topics)
+                        {
+                            <div class="topic-row">
+                                @if (EditingTopic == t)
+                                {
+                                    <input type="text" class="topic-edit-input"
+                                           @bind="EditingTopicValue" @bind:event="oninput"
+                                           @onkeydown="e => HandleEditTopicKeyDown(e, t)" />
+                                    <button type="button" class="topic-icon-btn topic-save-btn" title="Save"
+                                            @onclick="() => HandleSaveEditTopic(t)">✓</button>
+                                    <button type="button" class="topic-icon-btn" title="Cancel"
+                                            @onclick="HandleCancelEditTopic">✕</button>
+                                }
+                                else
+                                {
+                                    <span class="topic-name">@t</span>
+                                    <button type="button" class="topic-icon-btn topic-clear-btn" title="Clear this topic's saved question history — a fuller avoid-list nudges Claude toward longer, more-elaborate questions"
+                                            @onclick="() => HandleClearTopicHistory(t)">↺ @GetTopicHistoryCount(t)</button>
+                                    <button type="button" class="topic-icon-btn" title="Rename"
+                                            @onclick="() => HandleStartEditTopic(t)">✎</button>
+                                    <button type="button" class="topic-icon-btn topic-delete-btn" title="Delete"
+                                            @onclick="() => HandleDeleteTopic(t)">🗑</button>
+                                }
+                            </div>
+                        }
+                        @if (Settings.Topics.Count == 0)
+                        {
+                            <p class="topics-empty">No topics yet — add one below.</p>
+                        }
+                    </div>
+
+                    @if (!string.IsNullOrEmpty(TopicError))
+                    {
+                        <p class="settings-error">@TopicError</p>
+                    }
+                    @if (!string.IsNullOrEmpty(TopicNotice))
+                    {
+                        <p class="settings-notice">@TopicNotice</p>
+                    }
+
+                    <div class="topic-add-row">
+                        <input type="text" class="topic-add-input" placeholder="New topic name…"
+                               @bind="NewTopicName" @bind:event="oninput"
+                               @onkeydown="HandleAddTopicKeyDown" />
+                        <button type="button" class="topic-add-btn" @onclick="HandleAddTopic">+ Add</button>
+                    </div>
+                    <p class="settings-hint">
+                        Add, rename, or remove topics offered above. Deleting or renaming the
+                        currently-selected topic updates the Topic setting to match.
+                    </p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label-text">Question Format (applies to all quizzes)</label>
+                    <select @onchange="HandleFormatChange" class="settings-select">
+                        <option value="Any" selected="@(Settings.PreferredFormat == "Any")">Any (Claude decides)</option>
+                        <option value="MultipleChoice" selected="@(Settings.PreferredFormat == "MultipleChoice")">Multiple choice</option>
+                        <option value="ShortAnswer" selected="@(Settings.PreferredFormat == "ShortAnswer")">Short answer</option>
+                    </select>
+                    <p class="settings-hint">Prefer a question format, or let Claude choose what fits best.</p>
+                </div>
+
+                <div class="settings-group">
+                    <label class="settings-label-text">AI Recommendations (applies to all quizzes)</label>
+                    <select @onchange="HandleRecommendationModeChange" class="settings-select">
+                        <option value="Disabled" selected="@(Settings.RecommendationMode == "Disabled")">Disabled</option>
+                        <option value="Suggested" selected="@(Settings.RecommendationMode == "Suggested")">Show suggestions</option>
+                        <option value="Auto" selected="@(Settings.RecommendationMode == "Auto")">Auto-apply</option>
+                    </select>
+                    <p class="settings-hint">How to handle AI routing suggestions for what topic/difficulty to tackle next.</p>
+                </div>
+
+                @* → Configurable avoid-list size (was a fixed constant of 5 in
+                     both Quiz.razor and TimedQuiz.razor). Framed honestly in the
+                     hint rather than as a pure "more is better" dial — see
+                     QuizSettings.AvoidListSize's doc comment for why. *@
+                <div class="settings-group">
+                    <label class="settings-label-text">Avoid-list size (applies to all quizzes)</label>
+                    <input type="number" min="1" max="15" @onchange="HandleAvoidListSizeChange"
+                           value="@Settings.AvoidListSize" class="settings-input" />
+                    <p class="settings-hint">
+                        How many recent questions per topic Claude is told not to repeat (1-15).
+                        Higher means fewer repeats, but a longer avoid-list also nudges Claude
+                        toward longer, more-elaborate questions once it's full — see the "Clear
+                        history" (↺) buttons above if a topic's questions have started feeling
+                        long and you'd rather reset it than lower this number.
+                    </p>
+                </div>
+            </div>
+        </div>
+    }
+
+    @* → Big, distinct cards instead of the old inline text links — each
+         mode's accent color matches what that mode already uses once you're
+         inside it (purple ties back to app.css's global accent used
+         throughout Quiz.razor, blue ties back to TimedQuiz.razor's own
+         header/timer blue), so the color carries over instead of resetting
+         the moment you land on either page. New class names (mode-*) rather
+         than reusing .btn/.home from app.css — see the CSS-collision lesson
+         in CLAUDE.md about two things sharing a class name fighting over it;
+         these are unique everywhere in the project. *@
+    <div class="mode-grid">
+        <a class="mode-card mode-card-regular" href="/quiz">
+            <span class="mode-icon" aria-hidden="true">📝</span>
+            <span class="mode-title">Regular Quiz</span>
+            <span class="mode-desc">Go at your own pace. Check answers as you go and mark tricky ones for review.</span>
+            <span class="mode-cta">Start quiz <span class="mode-arrow">→</span></span>
+        </a>
+
+        <a class="mode-card mode-card-timed" href="/timed-quiz">
+            <span class="mode-icon" aria-hidden="true">⏱️</span>
+            <span class="mode-title">Timed Quiz</span>
+            <span class="mode-desc">Simulate exam conditions with a running clock and a fixed question count.</span>
+            <span class="mode-cta">Start quiz <span class="mode-arrow">→</span></span>
+        </a>
+    </div>
+</div>
+
+<style>
+    .home {
+        text-align: center;
+        position: relative;
+    }
+
+    .hero {
+        position: relative;
+        display: inline-block;
+    }
+
+    .hero h1 {
+        font-size: 2.5rem;
+        margin: 0 0 0.4rem;
+        background: linear-gradient(90deg, #6a35ff, #0090ff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    .hero p {
+        color: #666;
+        font-size: 1.05rem;
+        margin: 0 0 2.5rem;
+    }
+
+    .settings-btn {
+        position: absolute;
+        top: -0.5rem;
+        right: -2.5rem;
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        padding: 0.5rem;
+        border-radius: 50%;
+        transition: transform 0.2s ease, background-color 0.2s ease;
+    }
+
+    .settings-btn:hover {
+        transform: rotate(20deg);
+        background-color: rgba(0, 0, 0, 0.05);
+    }
+
+    .settings-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 999;
+    }
+
+    .settings-panel {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        z-index: 1000;
+        width: 90%;
+        max-width: 400px;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .settings-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1.5rem;
+        border-bottom: 1px solid #eee;
+    }
+
+    .settings-header h2 {
+        margin: 0;
+        font-size: 1.3rem;
+        color: #333;
+    }
+
+    .close-btn {
+        background: none;
+        border: none;
+        font-size: 1.2rem;
+        cursor: pointer;
+        color: #999;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        transition: background-color 0.2s ease, color 0.2s ease;
+    }
+
+    .close-btn:hover {
+        background-color: #f0f0f0;
+        color: #333;
+    }
+
+    .settings-content {
+        padding: 1.5rem;
+        overflow-y: auto;
+        flex: 1;
+    }
+
+    .settings-group {
+        margin-bottom: 1.5rem;
+    }
+
+    .settings-label {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .settings-checkbox {
+        margin-top: 0.25rem;
+        cursor: pointer;
+        width: 18px;
+        height: 18px;
+    }
+
+    .settings-label span {
+        font-weight: 500;
+        color: #333;
+        line-height: 1.4;
+    }
+
+    .settings-hint {
+        margin: 0.75rem 0 0 2rem;
+        font-size: 0.85rem;
+        color: #666;
+        line-height: 1.5;
+    }
+
+    .settings-label-text {
+        display: block;
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 0.5rem;
+        font-size: 0.95rem;
+    }
+
+    .settings-radio-group {
+        display: flex;
+        gap: 1.5rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .settings-radio {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .settings-radio input {
+        cursor: pointer;
+    }
+
+    .settings-radio span {
+        font-size: 0.9rem;
+        color: #555;
+    }
+
+    .settings-select,
+    .settings-input {
+        width: 100%;
+        padding: 0.5rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 0.9rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .settings-select:focus,
+    .settings-input:focus {
+        outline: none;
+        border-color: #6a35ff;
+        box-shadow: 0 0 0 2px rgba(106, 53, 255, 0.1);
+    }
+
+    /* → Manage Topics — a compact list of rows rather than a table; each row is
+       either "name + edit/delete" or, mid-rename, "input + save/cancel". */
+    .topics-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .topic-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.4rem 0.6rem;
+        background: #f7f7f8;
+        border-radius: 6px;
+    }
+
+    .topic-name {
+        flex: 1;
+        font-size: 0.9rem;
+        color: #333;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .topic-edit-input {
+        flex: 1;
+        padding: 0.3rem 0.5rem;
+        border: 1px solid #6a35ff;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+
+    .topic-edit-input:focus {
+        outline: none;
+    }
+
+    .topic-icon-btn {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        width: 1.75rem;
+        height: 1.75rem;
+        padding: 0;
+        font-size: 0.85rem;
+        cursor: pointer;
+        color: #555;
+        line-height: 1;
+        flex-shrink: 0;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+
+    .topic-icon-btn:hover {
+        background: #eee;
+        border-color: #ccc;
+    }
+
+    .topic-save-btn {
+        color: #1e7e34;
+        border-color: #b6e3c2;
+    }
+
+    .topic-save-btn:hover {
+        background: #e6f6ea;
+    }
+
+    .topic-delete-btn {
+        color: #c0392b;
+        border-color: #f3b8b8;
+    }
+
+    .topic-delete-btn:hover {
+        background: #fdeaea;
+        border-color: #e0342d;
+    }
+
+    /* → "Clear history" — resets a topic's persisted avoid-list (see
+       HandleClearTopicHistory). Wider than the other icon buttons (auto
+       width instead of the shared 1.75rem square) since its label carries a
+       count — "↺ 3" — not just a single icon character. Uses the app's
+       purple accent on hover rather than the save-green or delete-red
+       already in use here, since it's neither a confirm nor a destructive
+       action on the topic itself. */
+    .topic-clear-btn {
+        width: auto;
+        padding: 0 0.4rem;
+        font-size: 0.75rem;
+    }
+
+    .topic-clear-btn:hover {
+        background: #f2edff;
+        border-color: #d8cdfa;
+        color: #6a35ff;
+    }
+
+    .topics-empty {
+        margin: 0;
+        font-size: 0.85rem;
+        color: #999;
+        font-style: italic;
+    }
+
+    .topic-add-row {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .topic-add-input {
+        flex: 1;
+        padding: 0.5rem;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 0.9rem;
+    }
+
+    .topic-add-input:focus {
+        outline: none;
+        border-color: #6a35ff;
+        box-shadow: 0 0 0 2px rgba(106, 53, 255, 0.1);
+    }
+
+    .topic-add-btn {
+        background: #6a35ff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 0.5rem 0.9rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    .topic-add-btn:hover {
+        background: #5a28e6;
+    }
+
+    .settings-error {
+        margin: 0 0 0.5rem;
+        font-size: 0.85rem;
+        color: #c0392b;
+    }
+
+    .settings-notice {
+        margin: 0 0 0.5rem;
+        font-size: 0.85rem;
+        color: #1e7e34;
+    }
+
+    .mode-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1.5rem;
+        text-align: left;
+    }
+
+    .mode-card {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        padding: 2.25rem 1.75rem;
+        border-radius: 18px;
+        text-decoration: none;
+        color: white;
+        overflow: hidden;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    /* Subtle sheen in the corner — purely decorative, sits behind the text. */
+    .mode-card::after {
+        content: "";
+        position: absolute;
+        top: -40%;
+        right: -20%;
+        width: 65%;
+        height: 140%;
+        background: rgba(255, 255, 255, 0.08);
+        transform: rotate(20deg);
+        pointer-events: none;
+    }
+
+    .mode-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
+    }
+
+    .mode-card:focus-visible {
+        outline: 3px solid rgba(255, 255, 255, 0.8);
+        outline-offset: 2px;
+    }
+
+    .mode-card-regular {
+        background: linear-gradient(135deg, #8257ff, #5b21d6);
+    }
+
+    .mode-card-timed {
+        background: linear-gradient(135deg, #2f9bff, #0052a3);
+    }
+
+    .mode-icon {
+        font-size: 2.6rem;
+        line-height: 1;
+    }
+
+    .mode-title {
+        font-size: 1.4rem;
+        font-weight: 700;
+    }
+
+    .mode-desc {
+        font-size: 0.92rem;
+        opacity: 0.92;
+        line-height: 1.45;
+        flex: 1;
+    }
+
+    .mode-cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        font-weight: 600;
+        font-size: 0.92rem;
+        margin-top: 0.5rem;
+    }
+
+    .mode-arrow {
+        display: inline-block;
+        transition: transform 0.2s ease;
+    }
+
+    .mode-card:hover .mode-arrow {
+        transform: translateX(5px);
+    }
+
+    @@media (max-width: 480px) {
+        .mode-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .hero h1 {
+            font-size: 2rem;
+        }
+
+        .settings-btn {
+            position: static;
+            margin-top: 1rem;
+        }
+
+        .settings-panel {
+            width: 95%;
+        }
+    }
+</style>
+
+@code {
+    private bool ShowSettingsPanel = false;
+
+    // → Manage Topics state. EditingTopic holds the ORIGINAL name of whichever
+    // topic is mid-rename (null when nothing's being edited) — using the
+    // original name rather than an index keeps things correct even if the
+    // list order shifts underneath the edit for some reason. TopicError is
+    // shared by both Add and Rename since only one of those can be in
+    // progress at a time.
+    private string? EditingTopic;
+    private string EditingTopicValue = "";
+    private string NewTopicName = "";
+    private string? TopicError;
+
+    // → Feedback for HandleClearTopicHistory — same "one shared message
+    // slot" shape as TopicError, just for a non-error outcome. Cleared
+    // whenever a different Manage Topics action runs so it can't linger
+    // and read as feedback for the wrong action.
+    private string? TopicNotice;
+
+    // → Powers the "↺ 3" count shown on each topic's Clear-history button —
+    // without this there'd be no way to tell whether a topic's avoid-list is
+    // empty, partway to Settings.AvoidListSize, or already at the cap (and
+    // therefore already pushing every new question for that topic toward
+    // the longer/more-elaborate end — see BuildAvoidClause's comment in
+    // ClaudeQuizProvider). Loaded once on page init, which is the only time
+    // it can go stale: it's Quiz.razor (a different page/component
+    // instance) that actually updates the underlying localStorage entry,
+    // and navigating back to Home re-runs OnInitializedAsync anyway.
+    private Dictionary<string, int> TopicHistoryCounts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Load persisted settings from disk on page init
+        var persistedSettings = await SettingsPersistence.LoadSettingsAsync();
+        if (persistedSettings != null)
+        {
+            Settings.Model = persistedSettings.Model;
+            Settings.DifficultyFilter = persistedSettings.DifficultyFilter;
+            Settings.NumQuestions = persistedSettings.NumQuestions;
+            Settings.PrefetchNextQuestion = persistedSettings.PrefetchNextQuestion;
+            Settings.Topic = persistedSettings.Topic;
+            Settings.Topics = persistedSettings.Topics;
+            Settings.PreferredFormat = persistedSettings.PreferredFormat;
+            Settings.RecommendationMode = persistedSettings.RecommendationMode;
+            Settings.AvoidListSize = persistedSettings.AvoidListSize;
+        }
+
+        await RefreshTopicHistoryCountsAsync();
+    }
+
+    private int GetTopicHistoryCount(string topic) =>
+        TopicHistoryCounts.TryGetValue(topic, out var count) ? count : 0;
+
+    private async Task RefreshTopicHistoryCountsAsync()
+    {
+        try
+        {
+            var stored = await JS.InvokeAsync<string>("localStorage.getItem", "recentPromptsByTopic");
+            if (string.IsNullOrEmpty(stored))
+            {
+                TopicHistoryCounts = new();
+                return;
+            }
+
+            var byTopic = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, List<string>>>(stored);
+            TopicHistoryCounts = byTopic?.ToDictionary(kv => kv.Key, kv => kv.Value.Count) ?? new();
+        }
+        catch
+        {
+            // localStorage not available, or old/corrupt data under this key —
+            // just show no counts rather than failing page load.
+            TopicHistoryCounts = new();
+        }
+    }
+
+    private void ToggleSettingsPanel()
+    {
+        ShowSettingsPanel = !ShowSettingsPanel;
+    }
+
+    private void HandleModelChange(string? newModel)
+    {
+        if (!string.IsNullOrEmpty(newModel))
+        {
+            Settings.Model = newModel;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleDifficultyChange(ChangeEventArgs e)
+    {
+        if (e.Value is string newDifficulty)
+        {
+            Settings.DifficultyFilter = newDifficulty;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleNumQuestionsChange(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int newNum) && newNum >= 5 && newNum <= 20)
+        {
+            Settings.NumQuestions = newNum;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleAvoidListSizeChange(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out int newSize) && newSize >= 1 && newSize <= 15)
+        {
+            Settings.AvoidListSize = newSize;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandlePrefetchChange(ChangeEventArgs e)
+    {
+        if (e.Value is bool newValue)
+        {
+            Settings.PrefetchNextQuestion = newValue;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleTopicChange(ChangeEventArgs e)
+    {
+        if (e.Value is string newTopic)
+        {
+            Settings.Topic = newTopic;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleFormatChange(ChangeEventArgs e)
+    {
+        if (e.Value is string newFormat)
+        {
+            Settings.PreferredFormat = newFormat;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    private void HandleRecommendationModeChange(ChangeEventArgs e)
+    {
+        if (e.Value is string newMode)
+        {
+            Settings.RecommendationMode = newMode;
+            _ = SettingsPersistence.SaveSettingsAsync(Settings);
+            Settings.NotifySettingsChanged();
+        }
+    }
+
+    // → Manage Topics: Add. The actual list-manipulation logic lives in
+    // QuizTopicsLogic (pure, unit tested) — this method just translates its
+    // result (or rejection) into UI state and persists.
+    private void HandleAddTopic()
+    {
+        var updated = QuizTopicsLogic.AddTopic(Settings.Topics, NewTopicName);
+        if (updated is null)
+        {
+            TopicError = string.IsNullOrWhiteSpace(NewTopicName)
+                ? "Enter a topic name."
+                : "That topic already exists.";
+            return;
+        }
+
+        Settings.Topics = updated;
+        NewTopicName = "";
+        TopicError = null;
+        TopicNotice = null;
+        _ = SettingsPersistence.SaveSettingsAsync(Settings);
+        Settings.NotifySettingsChanged();
+    }
+
+    private void HandleAddTopicKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+            HandleAddTopic();
+    }
+
+    private void HandleStartEditTopic(string topic)
+    {
+        EditingTopic = topic;
+        EditingTopicValue = topic;
+        TopicError = null;
+        TopicNotice = null;
+    }
+
+    private void HandleCancelEditTopic()
+    {
+        EditingTopic = null;
+        EditingTopicValue = "";
+        TopicError = null;
+    }
+
+    // → Manage Topics: Rename (Update). Keeps Settings.Topic pointed at the
+    // renamed entry if it was the one selected — otherwise the dropdown would
+    // silently be "selecting" a name that no longer exists in Settings.Topics.
+    private void HandleSaveEditTopic(string originalTopic)
+    {
+        var updated = QuizTopicsLogic.RenameTopic(Settings.Topics, originalTopic, EditingTopicValue);
+        if (updated is null)
+        {
+            TopicError = string.IsNullOrWhiteSpace(EditingTopicValue)
+                ? "Enter a topic name."
+                : "That topic already exists.";
+            return;
+        }
+
+        Settings.Topics = updated;
+
+        if (Settings.Topic == originalTopic)
+            Settings.Topic = EditingTopicValue.Trim();
+
+        EditingTopic = null;
+        EditingTopicValue = "";
+        TopicError = null;
+        _ = SettingsPersistence.SaveSettingsAsync(Settings);
+        Settings.NotifySettingsChanged();
+    }
+
+    private void HandleEditTopicKeyDown(KeyboardEventArgs e, string originalTopic)
+    {
+        if (e.Key == "Enter")
+            HandleSaveEditTopic(originalTopic);
+        else if (e.Key == "Escape")
+            HandleCancelEditTopic();
+    }
+
+    // → Manage Topics: Delete. The one CRUD action with a confirmation step —
+    // per the app's existing IJSRuntime usage (Quiz.razor's localStorage
+    // avoid-list), the browser's native confirm() does the job without adding
+    // a whole second modal component on top of the settings panel. If the
+    // deleted topic was the active selection, fall back to "Any topic" rather
+    // than leaving Settings.Topic pointed at a name that's now gone.
+    private async Task HandleDeleteTopic(string topic)
+    {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Delete the topic \"{topic}\"? This can't be undone.");
+        if (!confirmed)
+            return;
+
+        Settings.Topics = QuizTopicsLogic.RemoveTopic(Settings.Topics, topic);
+
+        if (Settings.Topic == topic)
+            Settings.Topic = "";
+
+        if (EditingTopic == topic)
+            HandleCancelEditTopic();
+
+        TopicError = null;
+        TopicNotice = null;
+        _ = SettingsPersistence.SaveSettingsAsync(Settings);
+        Settings.NotifySettingsChanged();
+    }
+
+    // → Manage Topics: Clear history. Resets a topic's persisted avoid-list
+    // (Quiz.razor's RecentPromptsByTopic, saved to localStorage under the
+    // "recentPromptsByTopic" key) back to empty. Reaches directly into that
+    // same localStorage key via IJSRuntime — there's no live Quiz.razor
+    // instance to talk to from here, and there doesn't need to be, since the
+    // avoid-list's only job is to survive in browser storage between visits.
+    // Doesn't touch Settings.Topics or Settings.Topic at all — unlike
+    // Delete, this can't lose a topic or any quiz progress, just some
+    // repeat-avoidance memory, so it skips the confirm() step Delete uses.
+    // See RecentHistoryLogic.RemoveTopic and CLAUDE.md for why a topic's
+    // avoid-list needs clearing at all: it grows toward a cap of 5 with
+    // regular use — even just loading Quiz.razor counts, since a question
+    // is generated and shown immediately on page load whether or not it's
+    // ever answered — and once full, every future question for that topic
+    // stays on the longer/more-elaborate end (see BuildAvoidClause's
+    // comment in ClaudeQuizProvider) until it's reset.
+    private async Task HandleClearTopicHistory(string topic)
+    {
+        TopicError = null;
+
+        try
+        {
+            var stored = await JS.InvokeAsync<string>("localStorage.getItem", "recentPromptsByTopic");
+            if (string.IsNullOrEmpty(stored))
+            {
+                TopicNotice = $"\"{topic}\" had no saved question history to clear.";
+                return;
+            }
+
+            var byTopic = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, List<string>>>(stored);
+            if (byTopic is null || !byTopic.ContainsKey(topic))
+            {
+                TopicNotice = $"\"{topic}\" had no saved question history to clear.";
+                return;
+            }
+
+            var updated = RecentHistoryLogic.RemoveTopic(byTopic, topic);
+            var json = System.Text.Json.JsonSerializer.Serialize(updated);
+            await JS.InvokeVoidAsync("localStorage.setItem", "recentPromptsByTopic", json);
+
+            // → Update the on-screen count immediately rather than waiting for
+            // a full page reload to re-run RefreshTopicHistoryCountsAsync.
+            TopicHistoryCounts.Remove(topic);
+
+            TopicNotice = $"Cleared \"{topic}\"'s question history — new questions won't avoid old ones anymore.";
+        }
+        catch
+        {
+            // localStorage not available (private window, etc.) — nothing to clear anyway.
+            TopicNotice = null;
+        }
+    }
+}
+

@@ -1,0 +1,495 @@
+@* QuizResults.razor
+    Displays final quiz results:
+    - Overall score (% correct)
+    - Average time per question
+    - Breakdown by difficulty level (Easy/Medium/Hard)
+    - Options to restart or return to dashboard
+*@
+
+<div class="quiz-results-container">
+    <div class="results-card">
+        <div class="results-header">
+            <h1>Quiz Complete!</h1>
+            <p class="subtitle">Here's how you performed</p>
+        </div>
+
+        <!-- Main Score Display -->
+        <div class="score-display">
+            <div class="score-circle">
+                <div class="score-value">@($"{Result.PercentCorrect:F0}%")</div>
+                <div class="score-text">Correct</div>
+            </div>
+
+            <div class="score-summary">
+                <div class="summary-row">
+                    <span class="summary-label">Total Questions:</span>
+                    <span class="summary-value">@Result.TotalQuestions</span>
+                </div>
+                <div class="summary-row">
+                    <span class="summary-label">Correct Answers:</span>
+                    <span class="summary-value correct">@Result.CorrectAnswers</span>
+                </div>
+                <div class="summary-row">
+                    <span class="summary-label">Incorrect Answers:</span>
+                    <span class="summary-value incorrect">@(Result.TotalQuestions - Result.CorrectAnswers)</span>
+                </div>
+                <div class="summary-row">
+                    <span class="summary-label">Total Time:</span>
+                    <span class="summary-value">@FormatTime(Result.TotalTimeMs)</span>
+                </div>
+                <div class="summary-row">
+                    <span class="summary-label">Average Time/Question:</span>
+                    <span class="summary-value">@($"{Result.AverageTimePerQuestionMs / 1000.0:F1} s")</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Difficulty Breakdown -->
+        @if (Result.TotalByEasy > 0 || Result.TotalByMedium > 0 || Result.TotalByHard > 0)
+        {
+            <div class="breakdown-section">
+                <h3>Breakdown by Difficulty</h3>
+
+                <div class="difficulty-breakdown">
+                    @if (Result.TotalByEasy > 0)
+                    {
+                        <DifficultyBar Difficulty="Easy"
+                                      Correct="Result.CorrectByEasy ?? 0"
+                                      Total="Result.TotalByEasy ?? 0" />
+                    }
+
+                    @if (Result.TotalByMedium > 0)
+                    {
+                        <DifficultyBar Difficulty="Medium"
+                                      Correct="Result.CorrectByMedium ?? 0"
+                                      Total="Result.TotalByMedium ?? 0" />
+                    }
+
+                    @if (Result.TotalByHard > 0)
+                    {
+                        <DifficultyBar Difficulty="Hard"
+                                      Correct="Result.CorrectByHard ?? 0"
+                                      Total="Result.TotalByHard ?? 0" />
+                    }
+                </div>
+            </div>
+        }
+
+        <!-- Marked Questions Summary -->
+        @if (Result.MarkedForReview.Count > 0)
+        {
+            <div class="marked-summary">
+                <span class="badge-icon">⚠️</span>
+                <span>You marked @Result.MarkedForReview.Count question@(Result.MarkedForReview.Count != 1 ? "s" : "") for review during the quiz.</span>
+            </div>
+        }
+    </div>
+
+    @* → This screen used to be aggregate-only — score, breakdown by
+         difficulty, a count of marked questions — with no way to actually
+         see which questions were missed or why. The per-question detail
+         (prompt, your answer vs. correct answer, explanation) was sitting
+         right there in Result.Attempts the whole time; this section is the
+         first thing that reads it. Collapsed by default (behind a toggle,
+         not a separate quiz state) since a long miss list would otherwise
+         push the restart/dashboard buttons far below the fold. Mirrors the
+         same read-only reveal ReviewMarkedReveal.razor uses for marked
+         questions, just filtered to "not correct" instead of "was marked." *@
+    @if (IncorrectAttempts.Count > 0)
+    {
+        <div class="incorrect-review-section">
+            <button type="button" class="review-toggle" @onclick="() => ShowIncorrectReview = !ShowIncorrectReview">
+                @(ShowIncorrectReview ? "▾" : "▸") Review missed questions (@IncorrectAttempts.Count)
+            </button>
+
+            @if (ShowIncorrectReview)
+            {
+                <div class="missed-questions-list">
+                    @foreach (var attempt in IncorrectAttempts)
+                    {
+                        <div class="missed-question-card">
+                            <div class="missed-card-header">
+                                <span class="missed-question-label">Question @attempt.QuestionNumber</span>
+                                <span class="missed-result-badge">✗ Incorrect</span>
+                            </div>
+
+                            <div class="missed-question-content">
+                                <h3>@attempt.Question.Prompt</h3>
+
+                                @if (attempt.Question.Choices != null && attempt.Question.Choices.Count > 0)
+                                {
+                                    <div class="missed-answer-info">
+                                        <p><strong>Your answer:</strong> @attempt.UserAnswer</p>
+                                        <p><strong>Correct answer:</strong> @attempt.Question.CorrectAnswer</p>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="missed-answer-info">
+                                        <p><strong>Your answer:</strong></p>
+                                        <div class="missed-user-answer-box">@attempt.UserAnswer</div>
+                                        <p><strong>Expected answer:</strong></p>
+                                        <div class="missed-expected-answer-box">@attempt.Question.CorrectAnswer</div>
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrEmpty(attempt.Grade?.Explanation))
+                                {
+                                    <div class="missed-explanation-box">
+                                        <strong>Explanation:</strong>
+                                        <p>@attempt.Grade!.Explanation</p>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+
+    <!-- Action Buttons -->
+    <div class="action-buttons">
+        <button class="btn btn-primary" @onclick="OnRestart">
+            <span class="icon">🔄</span>
+            Start Another Quiz
+        </button>
+
+        <a href="/" class="btn btn-outline">
+            <span class="icon">🏠</span>
+            Return to Dashboard
+        </a>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public StudyAI.Models.TimedQuizResult Result { get; set; } = null!;
+
+    [Parameter]
+    public EventCallback OnRestart { get; set; }
+
+    // → "Not correct" rather than "IsCorrect == false" so a GradingFailed
+    // attempt (Grade.Outcome — see GradeResult) still shows up here to
+    // review, same as a genuinely wrong answer would. QuestionNumber order
+    // matches how they appeared during the quiz, not answer order.
+    private List<StudyAI.Models.QuestionAttempt> IncorrectAttempts =>
+        Result.Attempts
+            .Where(a => a.Grade?.IsCorrect != true)
+            .OrderBy(a => a.QuestionNumber)
+            .ToList();
+
+    private bool ShowIncorrectReview;
+
+    private string FormatTime(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.Hours > 0)
+            return $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+        return $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+}
+
+<style>
+    .quiz-results-container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+    }
+
+    .results-card {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+        margin-bottom: 2rem;
+    }
+
+    .results-header {
+        background: linear-gradient(135deg, #0066cc 0%, #0052a3 100%);
+        color: white;
+        padding: 2rem;
+        text-align: center;
+    }
+
+    .results-header h1 {
+        margin: 0 0 0.5rem 0;
+        font-size: 2rem;
+    }
+
+    .subtitle {
+        margin: 0;
+        font-size: 1.1rem;
+        opacity: 0.9;
+    }
+
+    .score-display {
+        display: flex;
+        gap: 2rem;
+        padding: 2rem;
+        align-items: center;
+    }
+
+    .score-circle {
+        flex-shrink: 0;
+        width: 160px;
+        height: 160px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #0066cc 0%, #0052a3 100%);
+        color: white;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+    }
+
+    .score-value {
+        font-size: 3rem;
+        font-weight: bold;
+        line-height: 1;
+    }
+
+    .score-text {
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+        opacity: 0.9;
+    }
+
+    .score-summary {
+        flex: 1;
+    }
+
+    .summary-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.75rem 0;
+        border-bottom: 1px solid #f0f0f0;
+    }
+
+    .summary-row:last-child {
+        border-bottom: none;
+    }
+
+    .summary-label {
+        color: #666;
+        font-weight: 500;
+    }
+
+    .summary-value {
+        color: #333;
+        font-weight: 600;
+    }
+
+    .summary-value.correct {
+        color: #28a745;
+    }
+
+    .summary-value.incorrect {
+        color: #dc3545;
+    }
+
+    .breakdown-section {
+        border-top: 1px solid #f0f0f0;
+        padding: 2rem;
+    }
+
+    .breakdown-section h3 {
+        margin: 0 0 1.5rem 0;
+        color: #333;
+        font-size: 1.1rem;
+    }
+
+    .difficulty-breakdown {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .marked-summary {
+        background: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 1rem 1.5rem;
+        margin: 2rem;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        color: #856404;
+        font-size: 0.95rem;
+    }
+
+    .badge-icon {
+        font-size: 1.3rem;
+        flex-shrink: 0;
+    }
+
+    /* → "missed-" prefixed throughout so these never collide with
+       ReviewMarkedReveal.razor's near-identical card styles, even though
+       the two never actually render at the same time (Running/ReviewMarked/
+       Results are mutually exclusive states in TimedQuiz.razor). */
+    .incorrect-review-section {
+        max-width: 800px;
+        margin: 0 auto 2rem;
+    }
+
+    .review-toggle {
+        width: 100%;
+        text-align: left;
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1rem 1.5rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #333;
+        cursor: pointer;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .review-toggle:hover {
+        background: #f9f9f9;
+    }
+
+    .missed-questions-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        margin-top: 1.5rem;
+    }
+
+    .missed-question-card {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .missed-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        background: #f9f9f9;
+        border-bottom: 1px solid #e0e0e0;
+    }
+
+    .missed-question-label {
+        font-weight: 600;
+        color: #333;
+    }
+
+    .missed-result-badge {
+        padding: 0.35rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .missed-question-content {
+        padding: 1.5rem;
+    }
+
+    .missed-question-content h3 {
+        margin: 0 0 1rem 0;
+        color: #333;
+        font-size: 1.1rem;
+        line-height: 1.5;
+    }
+
+    .missed-answer-info p {
+        margin: 0.5rem 0;
+        color: #666;
+    }
+
+    .missed-answer-info strong {
+        color: #333;
+    }
+
+    .missed-user-answer-box,
+    .missed-expected-answer-box {
+        background: #f9f9f9;
+        border-left: 3px solid #0066cc;
+        padding: 0.75rem 1rem;
+        border-radius: 4px;
+        margin: 0.75rem 0;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .missed-expected-answer-box {
+        border-left-color: #28a745;
+    }
+
+    .missed-explanation-box {
+        background: #f0f6ff;
+        border-left: 3px solid #0066cc;
+        padding: 1rem;
+        border-radius: 4px;
+        margin-top: 1rem;
+    }
+
+    .missed-explanation-box strong {
+        color: #0066cc;
+    }
+
+    .missed-explanation-box p {
+        margin: 0.5rem 0 0 0;
+        color: #666;
+        line-height: 1.5;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 1rem;
+    }
+
+    .btn {
+        padding: 1rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        flex: 1;
+        text-decoration: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+    }
+
+    .btn-primary {
+        background-color: #0066cc;
+        color: white;
+    }
+
+    .btn-primary:hover {
+        background-color: #0052a3;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+    }
+
+    .btn-outline {
+        background: white;
+        color: #666;
+        border: 1px solid #ddd;
+    }
+
+    .btn-outline:hover {
+        background: #f9f9f9;
+        border-color: #999;
+    }
+
+    .icon {
+        font-size: 1.2rem;
+    }
+</style>

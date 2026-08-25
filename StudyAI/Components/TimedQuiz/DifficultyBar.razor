@@ -1,0 +1,93 @@
+@* DifficultyBar.razor
+    Reusable component to display a difficulty level's correct/total performance
+    as a horizontal progress bar with labels.
+*@
+
+<div class="difficulty-bar-container">
+    <div class="difficulty-header">
+        <span class="difficulty-label">@Difficulty</span>
+        <span class="difficulty-score">@($"{Correct}/{Total} correct")</span>
+    </div>
+
+    <div class="progress-bar">
+        @{
+            var percentage = Total > 0 ? (Correct * 100.0 / Total) : 0;
+        }
+        <div class="progress-fill @Difficulty.ToLower()" style="width: @($"{percentage:F0}%")">
+            @if (Total > 0)
+            {
+                <span class="progress-text">@($"{percentage:F0}%")</span>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Difficulty { get; set; } = "Easy";
+
+    [Parameter]
+    public int Correct { get; set; }
+
+    [Parameter]
+    public int Total { get; set; }
+}
+
+<style>
+    .difficulty-bar-container {
+        margin-bottom: 1rem;
+    }
+
+    .difficulty-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.5rem;
+    }
+
+    .difficulty-label {
+        font-weight: 600;
+        color: #333;
+        font-size: 0.95rem;
+    }
+
+    .difficulty-score {
+        font-size: 0.9rem;
+        color: #666;
+    }
+
+    .progress-bar {
+        height: 32px;
+        background: #f0f0f0;
+        border-radius: 16px;
+        overflow: hidden;
+        border: 1px solid #e0e0e0;
+    }
+
+    .progress-fill {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-weight: 600;
+        font-size: 0.85rem;
+        transition: width 0.3s ease;
+    }
+
+    .progress-fill.easy {
+        background: linear-gradient(90deg, #28a745, #20c997);
+    }
+
+    .progress-fill.medium {
+        background: linear-gradient(90deg, #ffc107, #ff9800);
+    }
+
+    .progress-fill.hard {
+        background: linear-gradient(90deg, #dc3545, #c82333);
+    }
+
+    .progress-text {
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    }
+</style>

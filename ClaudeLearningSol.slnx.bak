@@ -1,0 +1,12 @@
+<Solution>
+<<<<<<< Updated upstream
+  <Project Path="StudyAI/StudyAI.csproj" />
+  <Project Path="StudyAI.Tests/StudyAI.Tests.csproj" />
+=======
+  <Folder Name="/Solution Items/">
+    <File Path="EXAM_TOC.md" />
+    <File Path="quiz-architecture-diagram.html" />
+  </Folder>
+  <Project Path="AgentWorkflows/AgentWorkflows.csproj" />
+>>>>>>> Stashed changes
+</Solution>

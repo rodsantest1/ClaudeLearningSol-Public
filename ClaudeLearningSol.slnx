@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="AgentWorkflows_Summary.md" />
+    <File Path="EXAM_TOC.md" />
+    <File Path="quiz-architecture-diagram.html" />
+    <File Path="StudyAI_Summary.md" />
+  </Folder>
+  <Project Path="StudyAI/StudyAI.csproj" />
+  <Project Path="StudyAI.Tests/StudyAI.Tests.csproj" />
+  <Project Path="StudyAI.ToolChoiceDemo/StudyAI.ToolChoiceDemo.csproj" />
+</Solution>

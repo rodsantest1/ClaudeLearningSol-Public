@@ -1,0 +1,1261 @@
+@page "/timed-quiz"
+@using StudyAI.Components.TimedQuiz
+@using StudyAI.Services
+@rendermode InteractiveServer
+@implements IDisposable
+@inject IQuizProvider QuizProvider
+@inject IJSRuntime JS
+@inject QuizSettings Settings
+
+<PageTitle>Timed Quiz</PageTitle>
+
+<div class="timed-quiz">
+    <a class="back-link" href="/">← Back to home</a>
+    <h1>Timed Quiz</h1>
+
+    @if (State == TimedQuizState.Running)
+    {
+        @* → Single unified sticky header for the whole Running state:
+             progress + "Question X of Y", the timers/pause button, and Quit
+             Quiz. Previous/Next used to live here too — they've moved to
+             .answer-nav-footer at the bottom, next to the answers, and
+             merged with what used to be QuizRunner's own Submit/Next
+             Question button (see HandleNext's comment). Quit Quiz moved up
+             here to take the empty space that left, as its own control
+             (not nested inside .timer-group) rather than sharing a row with
+             the question card's action buttons the way it used to.
+
+             DisplayedQuestionNumber (not Attempts.Count) is what fixes the
+             "counter advances before the next question loads" bug: while
+             browsing history it reads the browsed attempt's own
+             QuestionNumber, and while live it reads the QuestionNumber
+             field, which LoadNextQuestion only bumps once the new question
+             has actually arrived — never a raw count of submitted answers,
+             which changes the instant HandleAnswer adds to Attempts, well
+             before the next question is ready. *@
+        <div class="quiz-header">
+            <div class="progress-info">
+                <span class="question-counter">
+                    @if (ViewIndex is not null)
+                    {
+                        <text>Reviewing question <strong>@DisplayedQuestionNumber</strong> of <strong>@CurrentConfig.NumQuestions</strong></text>
+                    }
+                    else
+                    {
+                        <text>Question <strong>@DisplayedQuestionNumber</strong> of <strong>@CurrentConfig.NumQuestions</strong></text>
+                    }
+                </span>
+                <div class="header-progress-bar">
+                    @{
+                        var progressPercent = CurrentConfig.NumQuestions > 0 ? (DisplayedQuestionNumber * 100.0 / CurrentConfig.NumQuestions) : 0;
+                    }
+                    <div class="header-progress-fill" style="width: @($"{progressPercent:F0}%")"></div>
+                </div>
+            </div>
+
+            <div class="timer-group">
+                <div class="timer">
+                    <span class="timer-label">Question:</span>
+                    <span class="timer-value">@FormatTime(QuestionStopwatch.ElapsedMilliseconds)</span>
+                </div>
+                <div class="timer">
+                    <span class="timer-label">Total:</span>
+                    <span class="timer-value">@FormatTime(QuizStopwatch.ElapsedMilliseconds)</span>
+                </div>
+                <button type="button" class="pause-btn" title="@(IsPaused ? "Resume" : "Pause")"
+                        disabled="@IsBusy"
+                        @onclick="HandleTogglePause">
+                    @(IsPaused ? "▶" : "⏸")
+                </button>
+            </div>
+
+            <button type="button" class="quit-btn" @onclick="HandleQuit" disabled="@IsBusy">
+                Quit Quiz
+            </button>
+        </div>
+
+        @* → Browsing a past attempt renders the SAME QuizRunner card as the
+             live question. No separate "history viewer" component — see
+             QuizRunner's top comment. Its selection preselects the stored
+             answer (SelectedAnswer="HistorySelectedAnswer", synced by
+             GoToPrevious/GoToNext below) and Mark for Review is hidden here
+             (ShowMarkForReview="false") — retroactively marking/unmarking an
+             already-submitted attempt isn't something this app handles. *@
+        @if (ViewIndex is not null)
+        {
+            <QuizRunner Question="Attempts[ViewIndex.Value].Question"
+                       QuestionNumber="Attempts[ViewIndex.Value].QuestionNumber"
+                       SelectedAnswer="@HistorySelectedAnswer"
+                       SelectedAnswerChanged="v => HistorySelectedAnswer = v"
+                       ShowMarkForReview="false" />
+        }
+
+        @* → QuizRunner (and the load-error-card) stay mounted at all times
+             during Running — only hidden via CSS, never removed from the
+             render tree — so an in-progress but not-yet-submitted answer on
+             the live question survives a trip back through history instead
+             of being reset when the component remounts. *@
+        <div style="display:@(ViewIndex is null ? "block" : "none")">
+            @if (CurrentQuestion == null && LoadError != null && !IsLoadingQuestion)
+            {
+                <div class="load-error-card">
+                    <p class="load-error-heading">Couldn't reach Claude for the next question.</p>
+                    <p class="load-error-detail">@LoadError</p>
+                    <div class="load-error-actions">
+                        <button class="btn btn-primary" @onclick="HandleRetryLoad">Try again</button>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <QuizRunner Question="CurrentQuestion"
+                           QuestionNumber="QuestionNumber"
+                           SelectedAnswer="@LiveSelectedAnswer"
+                           SelectedAnswerChanged="v => LiveSelectedAnswer = v"
+                           IsMarked="LiveIsMarked"
+                           IsMarkedChanged="v => LiveIsMarked = v"
+                           ShowMarkForReview="true" />
+
+                @* → Same "Session: N API calls · ms total · tokens total (in/out)"
+                     line Quiz.razor shows, using the same .session-stats class from
+                     app.css. TimedQuiz never tracked this before — RecordCall counts
+                     every GetQuestionAsync call (including a max_tokens retry) and
+                     every GradeAsync call, same as Quiz.razor does for its own
+                     generation/grading calls. *@
+                @if (SessionCalls > 0)
+                {
+                    <p class="session-stats">
+                        Session: @SessionCalls API calls · @SessionElapsedMs ms total (@(SessionElapsedMs / SessionCalls) ms avg) ·
+                        @(SessionInputTokens + SessionOutputTokens) tokens total (@SessionInputTokens in / @SessionOutputTokens out)
+                    </p>
+                }
+
+                @* → Transient — only ever describes what just happened on the
+                     CURRENT question, cleared the moment the next one starts
+                     loading. See RecentNotice/LoadNextQuestion. *@
+                @if (RecentNotice is not null)
+                {
+                    <p class="session-notice">⚠ @RecentNotice</p>
+                }
+            }
+        </div>
+
+        @* → The unified Previous/Next row — bottom of the answers, always
+             rendered (same reasoning as the header: a failed fetch shouldn't
+             lock the student out of checking earlier answers, and Previous
+             still works fine while the load-error-card is showing). One
+             shared control for both live and history instead of two
+             different-looking, differently-behaving buttons — see
+             HandlePrevious/HandleNext for exactly what each does depending
+             on ViewIndex. *@
+        <div class="answer-nav-footer">
+            <button type="button" class="nav-btn" @onclick="HandlePrevious"
+                    disabled="@(!CanGoPrevious || IsBusy)" title="Previous question">
+                ← Previous
+            </button>
+            <button type="button" class="btn-next" @onclick="HandleNext"
+                    disabled="@(!CanClickNext || IsBusy)">
+                @NextButtonLabel
+            </button>
+        </div>
+    }
+    else if (State == TimedQuizState.ReviewMarked)
+    {
+        <ReviewMarkedQuestions Attempts="Attempts"
+                              MarkedIndices="MarkedForReview"
+                              MarkedQuestionsFinalized="MarkedQuestionsFinalized"
+                              OnFinishMarked="HandleFinishMarked"
+                              OnContinue="HandleContinueToResults"
+                              OnRestart="HandleRestart" />
+
+        @* → Show session stats during review so the timer remains visible *@
+        @if (SessionCalls > 0)
+        {
+            <p class="session-stats">
+                Session: @SessionCalls API calls · @QuizStopwatch.ElapsedMilliseconds ms total (@(QuizStopwatch.ElapsedMilliseconds / SessionCalls) ms avg) ·
+                @(SessionInputTokens + SessionOutputTokens) tokens total (@SessionInputTokens in / @SessionOutputTokens out)
+            </p>
+        }
+    }
+
+    else if (State == TimedQuizState.Results)
+    {
+        <QuizResults Result="QuizResult" OnRestart="HandleRestart" />
+    }
+</div>
+
+@code {
+    private enum TimedQuizState { Setup, Configuring, Running, ReviewMarked, Results }
+
+    // → What FetchQuestionWithRetry hands back, instead of touching
+    // RecordCall/RecentNotice itself. This method is used for BOTH the
+    // live "load the next question right now" path and the background
+    // prefetch of the question after that — if it wrote to RecentNotice
+    // directly, a truncation retry on the PREFETCHED question would show
+    // its "retried with a bigger budget" notice while the CURRENT
+    // question is still on screen, attributing it to the wrong question.
+    // LoadNextQuestion applies Calls/RetryNotice itself, only once it
+    // actually promotes this result to be the displayed question.
+    private record FetchResult(StudyAI.Models.QuizQuestion Question, List<ApiCallStats> Calls, string? RetryNotice);
+
+    // → One Claude call's timing/token numbers, queued up by
+    // FetchQuestionWithRetry so LoadNextQuestion can feed each one through
+    // RecordCall in order once the fetch is actually applied. A List rather
+    // than a single value because a truncation retry means up to two calls
+    // (the original attempt plus the retry) belong to one FetchResult.
+    private record ApiCallStats(long ElapsedMs, int? InputTokens, int? OutputTokens);
+
+    private TimedQuizState State = TimedQuizState.Setup;
+    private QuickStartOrConfigure? setupComponent;
+    private StudyAI.Models.TimedQuizConfig CurrentConfig = StudyAI.Models.TimedQuizConfig.QuickStart();
+    private StudyAI.Models.TimedQuizResult? QuizResult;
+
+    private StudyAI.Models.QuizQuestion? CurrentQuestion;
+    private List<StudyAI.Models.QuestionAttempt> Attempts = new();
+    private List<int> MarkedForReview = new();
+    private int QuestionNumber = 0;
+    private bool IsLoadingQuestion = false;
+    private bool IsPaused = false;
+
+    // → Fetch for the question AFTER whatever's currently live, started as
+    // soon as the current one is actually shown (see where this gets
+    // assigned, at the bottom of LoadNextQuestion) rather than waiting for
+    // the student to click Next first. LoadNextQuestion consumes this
+    // (awaiting it if it hasn't finished yet) the next time it runs,
+    // instead of starting a fresh fetch — so the round-trip to Claude
+    // mostly happens while the student is still reading/answering the
+    // current question, not after.
+    //
+    // Deliberately doesn't need InvokeAsync or the _quizRunId guard
+    // GradeInBackground uses below — nothing acts on this Task except a
+    // later, ordinary `await` from LoadNextQuestion itself, which only
+    // ever runs as part of the current run's own click-handler chain. If
+    // the student quits or restarts before it's ever consumed, StartQuiz
+    // just nulls this field out, orphaning whatever was in flight — no
+    // stale write can happen because nothing was ever going to read it.
+    private Task<FetchResult>? _prefetchTask;
+
+    // → Bumped every time a quiz actually starts (see StartQuiz). Background
+    // grading (GradeInBackground) can finish after the student has already
+    // quit and started a NEW quiz — this lets that stale write recognize
+    // it's stale and no-op instead of landing a grade in the wrong run's
+    // Attempts list (which, by then, might not even have an attempt at
+    // that QuestionNumber, or might have an entirely different question
+    // sitting there).
+    private int _quizRunId;
+
+    // → Background grading tasks not yet confirmed complete — see
+    // GradeInBackground. HandleContinueToResults awaits all of these
+    // before building the final result, as the safety net for whatever
+    // hasn't finished by the time the student gets there (grading a
+    // sentence is almost always faster than reading the rest of the quiz,
+    // so in practice this list is usually already empty by then).
+    private readonly List<Task> _pendingGradingTasks = new();
+
+    // → The live question's current pick and mark-for-review state, bound
+    // two-way into the live QuizRunner instance (SelectedAnswer/IsMarked).
+    // Used to still be private fields inside QuizRunner itself, read
+    // directly by its own Submit button; now that Submit lives here (merged
+    // into HandleNext — see its comment), the parent needs to hold this
+    // state to know what to submit and whether Next should even be
+    // clickable. Reset to ""/false in StartQuiz and again at the end of
+    // HandleAnswer, once a submission has actually gone through.
+    private string LiveSelectedAnswer = "";
+    private bool LiveIsMarked = false;
+
+    // → Same idea as LiveSelectedAnswer, for whichever historical attempt
+    // Previous/Next is currently browsing. Synced by GoToPrevious/GoToNext
+    // every time ViewIndex changes, rather than reactively derived — see
+    // those methods' comments.
+    private string HistorySelectedAnswer = "";
+
+    // → Set synchronously (before the first await) at the top of HandleNext
+    // for the live-submit path, so Next disables itself on the very next
+    // render instead of staying clickable for the length of the GradeAsync
+    // call that happens before IsLoadingQuestion ever flips true (that flag
+    // only covers the LoadNextQuestion fetch afterward). Guards against a
+    // double-click firing two concurrent submissions of the same question —
+    // the same job QuizRunner's local isSubmitting used to do, just up here
+    // now that submission itself lives here.
+    private bool IsSubmittingAnswer = false;
+
+    // → Per-question max_tokens budget passed to GetQuestionAsync. Starts at
+    // ClaudeQuizProvider's own default and only ever ratchets UP within a
+    // single quiz run, via TimedQuizLogic.BumpMaxTokens, whenever a fetch
+    // comes back truncated (QuizQuestion.WasTruncated) — see LoadNextQuestion.
+    // Reset back to the default in StartQuiz so a new quiz doesn't inherit an
+    // inflated budget from a previous run for no reason.
+    private const int InitialMaxTokens = 700;
+    private int CurrentMaxTokens = InitialMaxTokens;
+
+    // → Session-wide API cost tracking — same fields and RecordCall shape as
+    // Quiz.razor's, just never added here before. Counts every real call to
+    // Claude (question generation, including a max_tokens retry, and
+    // grading), not just the ones that succeeded — a truncated attempt still
+    // cost tokens even though ErrorQuestion doesn't carry a question back.
+    private int SessionCalls;
+    private long SessionElapsedMs;
+    private int SessionInputTokens;
+    private int SessionOutputTokens;
+
+    private void RecordCall(long elapsedMs, int? inputTokens, int? outputTokens)
+    {
+        SessionCalls++;
+        SessionElapsedMs += elapsedMs;
+        SessionInputTokens += inputTokens ?? 0;
+        SessionOutputTokens += outputTokens ?? 0;
+    }
+
+    // → One-shot notice shown under the session-stats line when this question
+    // needed a max_tokens retry. Deliberately transient, not a running log:
+    // cleared at the top of every LoadNextQuestion call, so it's visible for
+    // exactly the question it happened on and gone once the next one loads.
+    // A timed exam is the one place a pile of status notices would actively
+    // hurt — the timer and the question are what should hold attention — so
+    // this stays a single most-recent notice rather than a list.
+    private string? RecentNotice;
+
+    // → ClaudeQuizProvider fails closed: when the API call errors (missing
+    // key, network failure, bad response), GetQuestionAsync doesn't throw —
+    // it returns a placeholder QuizQuestion with Topic "Setup needed" and a
+    // single "OK" choice, so old code that expected a real question back
+    // wouldn't crash. LoadNextQuestion was treating that placeholder as a
+    // real question: it advanced the question counter and let the student
+    // "submit" it, which got graded and counted toward the final score.
+    // LoadError is what LoadNextQuestion sets instead, so this failure shows
+    // a genuine retry screen and never becomes a counted attempt.
+    private string? LoadError;
+
+    // → Marked-for-review questions are submitted but graded LATER — see
+    // HandleAnswer and HandleFinishMarked. This flag tells ReviewMarked
+    // whether that grading has happened yet (false = still editable, no
+    // answers revealed; true = graded, read-only reveal). Continue to
+    // Results is only reachable once this is true.
+    private bool MarkedQuestionsFinalized = false;
+
+    private System.Diagnostics.Stopwatch QuizStopwatch = new();
+    private System.Diagnostics.Stopwatch QuestionStopwatch = new();
+
+    // → Back/forward navigation across already-answered questions during a
+    // running quiz. null = viewing/answering the live current question
+    // (normal flow, the live QuizRunner visible and interactive); a
+    // non-null value is a 0-based index into Attempts being browsed — and
+    // potentially revised — via a SECOND QuizRunner instance. The live
+    // QuizRunner itself stays mounted throughout (hidden with CSS, not
+    // removed from the render tree) — see the display:none wrapper in the
+    // markup above — so an in-progress, not-yet-submitted answer on the
+    // live question isn't lost just from looking back at an earlier one.
+    // See HandlePrevious/HandleNext/HandleSaveHistoryEdit for what
+    // "revised" actually does to the stored attempt.
+    private int? ViewIndex;
+
+    // → All the actual index math lives in TimedQuizLogic (GetPreviousViewIndex/
+    // GetNextViewIndex/CanGoPrevious/CanGoNext/IsAtLastHistoryEntry) —
+    // pulled out the same way TogglePause was, so it's unit tested
+    // (StudyAI.Tests/TimedQuizLogicTests.cs) without needing a running
+    // Blazor component. These just forward the current ViewIndex/Attempts.Count.
+    private bool CanGoPrevious => StudyAI.Services.TimedQuizLogic.CanGoPrevious(ViewIndex, Attempts.Count);
+    private bool CanGoNext => StudyAI.Services.TimedQuizLogic.CanGoNext(ViewIndex);
+    private bool IsAtLastHistoryEntry => StudyAI.Services.TimedQuizLogic.IsAtLastHistoryEntry(ViewIndex, Attempts.Count);
+
+    // → Whether ANY async operation that Previous/Next/Quit/pause shouldn't
+    // race is currently in flight: fetching the next question, or
+    // submitting the live answer. Saving a history edit used to belong
+    // here too, but HandleSaveHistoryEdit no longer awaits anything — it
+    // updates the stored answer synchronously and grades in the background
+    // (see GradeInBackground), so there's no window left where Previous/
+    // Next need to be disabled for it.
+    private bool IsBusy => IsLoadingQuestion || IsSubmittingAnswer;
+
+    // → Whether Next is clickable. Live, it doubles as "is there anything to
+    // submit" (mirrors the old Submit button's disabled condition); browsing
+    // history, it's always clickable when there's somewhere to go — CanGoNext
+    // is true for any non-null ViewIndex, since worst case Next just returns
+    // to the live question. Unlike the old per-instance Submit button,
+    // history-mode Next does NOT require a change to be enabled — it's
+    // primarily a navigation control now, and saves a pending edit as a
+    // bonus side effect only if one exists (see HandleNext).
+    private bool CanClickNext => ViewIndex is null
+        ? !string.IsNullOrEmpty(LiveSelectedAnswer)
+        : CanGoNext;
+
+    // → The header's "Question N of Y" label — deliberately NOT a
+    // TimedQuizLogic pure function like the ones above. An earlier version
+    // (GetViewPosition) computed the live case as Attempts.Count + 1, which
+    // looked right but wasn't: Attempts.Add happens synchronously in
+    // HandleAnswer, before the async LoadNextQuestion fetch resolves, so
+    // that counter jumped to N+1 the instant an answer was submitted —
+    // well before the next question actually loaded. QuestionNumber is the
+    // field that only advances once the fetch succeeds (see the comment in
+    // LoadNextQuestion), so the live case has to read that instead of
+    // deriving a count from Attempts. That dependency on a field outside
+    // (viewIndex, attemptsCount) is what keeps this out of TimedQuizLogic.
+    private int DisplayedQuestionNumber => ViewIndex is not null ? Attempts[ViewIndex.Value].QuestionNumber : QuestionNumber;
+
+    // → Label for the merged bottom-of-page action button. Transient states
+    // (submitting/saving, loading, paused) take priority over the
+    // live-vs-history wording, same ordering the old per-instance Submit
+    // button used. "Next Question" is gone — this button now shares a row
+    // with Previous, so plain "Next →" (matching Previous's arrow style) or
+    // "Submit" for the actual last question reads clearly without it.
+    private string NextButtonLabel
+    {
+        get
+        {
+            if (IsSubmittingAnswer) return "Saving...";
+            if (IsLoadingQuestion) return "Loading next question...";
+            if (IsPaused) return "Paused";
+            if (ViewIndex is null) return QuestionNumber < CurrentConfig.NumQuestions ? "Next →" : "Submit";
+            return IsAtLastHistoryEntry ? "Back to current →" : "Next →";
+        }
+    }
+
+    // → Moves ViewIndex and immediately syncs HistorySelectedAnswer to match
+    // whatever's now being viewed (the browsed attempt's stored answer, or
+    // "" once back to null/live) — done here, at the one place ViewIndex
+    // actually changes, rather than reactively inside QuizRunner. See
+    // QuizRunner's OnParametersSet comment for why that reactive approach
+    // caused real bugs the first two times this app tried it.
+    private void SyncHistorySelection()
+    {
+        HistorySelectedAnswer = ViewIndex is not null ? Attempts[ViewIndex.Value].UserAnswer : "";
+    }
+
+    private void GoToPrevious()
+    {
+        ViewIndex = StudyAI.Services.TimedQuizLogic.GetPreviousViewIndex(ViewIndex, Attempts.Count);
+        SyncHistorySelection();
+    }
+
+    private void GoToNext()
+    {
+        ViewIndex = StudyAI.Services.TimedQuizLogic.GetNextViewIndex(ViewIndex, Attempts.Count);
+        SyncHistorySelection();
+    }
+
+    // → Moved here from QuizRunner.razor along with the rest of the header
+    // it used to render — this is now the only place "Question:"/"Total:"
+    // timers are drawn.
+    private string FormatTime(long ms)
+    {
+        var ts = TimeSpan.FromMilliseconds(ms);
+        if (ts.Hours > 0)
+            return $"{ts.Hours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+        return $"{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+
+    // → Previous: steps back through history (or, from live, enters it at
+    // the most recent attempt). If there's a pending edit on the entry
+    // being left (HistorySelectedAnswer differs from what's stored),
+    // HandleSaveHistoryEdit saves it first — it already no-ops safely when
+    // nothing changed, so this is safe to call unconditionally. Leaving the
+    // LIVE question via Previous is deliberately different: nothing here
+    // touches LiveSelectedAnswer or submits it. Peeking at history should
+    // never accidentally submit/grade an in-progress live pick — only
+    // Next does that, and only from the live question.
+    private void HandlePrevious()
+    {
+        if (ViewIndex is not null)
+            HandleSaveHistoryEdit(HistorySelectedAnswer);
+
+        GoToPrevious();
+    }
+
+    // → Next: does two different jobs depending on ViewIndex, unified into
+    // one button because both are fundamentally "commit what's shown, then
+    // move forward" — merged here from what used to be QuizRunner's own
+    // Submit/Next Question button (live) and this page's separate header
+    // Next button (history), which looked and behaved differently for what
+    // the "every screen should be the same" redesign earlier in this app's
+    // history was already trying to unify.
+    //   - Live (ViewIndex null): submits LiveSelectedAnswer through the
+    //     existing HandleAnswer pipeline (grades it, adds the attempt,
+    //     loads the next question) — same contract Submit always had.
+    //     IsSubmittingAnswer guards against a double-click mid-grade, the
+    //     same job QuizRunner's local isSubmitting used to do.
+    //   - History (ViewIndex not null): saves a pending edit if there is
+    //     one (again, HandleSaveHistoryEdit no-ops if nothing changed),
+    //     then steps forward — or, from the last historical entry, back to
+    //     the live question, same "Back to current →" behavior as before.
+    private async Task HandleNext()
+    {
+        if (ViewIndex is null)
+        {
+            if (string.IsNullOrEmpty(LiveSelectedAnswer))
+                return;
+
+            IsSubmittingAnswer = true;
+            try
+            {
+                await HandleAnswer(LiveSelectedAnswer, LiveIsMarked);
+            }
+            finally
+            {
+                IsSubmittingAnswer = false;
+            }
+        }
+        else
+        {
+            HandleSaveHistoryEdit(HistorySelectedAnswer);
+            GoToNext();
+        }
+    }
+
+    // → Fired (via HandleNext/HandlePrevious) when the student changes an
+    // already-submitted answer while browsing history and Previous/Next is
+    // clicked. Behavior forks on whether the attempt was already graded
+    // (see TimedQuizLogic.ShouldDeferGradingOnSave):
+    //   - A regular (non-marked) attempt already has a Grade, so changing
+    //     the answer re-grades it with the new text — same "submit, get
+    //     feedback" contract as the live question, just fired again.
+    //     RecordCall folds the extra API call into the same session totals
+    //     as everything else (Model Selection and Optimization, CCDV-F,
+    //     16.8%: this is a real, visible cost of letting the student
+    //     revise their mind, not a free action). The re-grade itself runs
+    //     in the background via GradeInBackground rather than being
+    //     awaited here — same reasoning as HandleAnswer: nothing renders
+    //     correctness for any attempt while Running, so there's nothing
+    //     for the student to wait on, and blocking Previous/Next on a
+    //     grading call would only slow down browsing history for no
+    //     visible benefit.
+    //   - A marked-for-review attempt with Grade still null is mid deferred
+    //     grading (see QuestionAttempt's doc comment) — only the stored
+    //     answer updates here. Grading it now would defeat the point of
+    //     marking it for review in the first place; it still gets graded
+    //     later, in HandleFinishMarked, using whatever answer is here by
+    //     then.
+    private void HandleSaveHistoryEdit(string newAnswer)
+    {
+        if (ViewIndex is null) return;
+        var index = ViewIndex.Value;
+        if (index < 0 || index >= Attempts.Count) return;
+
+        var attempt = Attempts[index];
+        if (string.IsNullOrWhiteSpace(newAnswer) || newAnswer == attempt.UserAnswer)
+            return;
+
+        Attempts[index] = attempt with { UserAnswer = newAnswer };
+
+        if (!StudyAI.Services.TimedQuizLogic.ShouldDeferGradingOnSave(attempt.MarkedForReview, attempt.Grade))
+            GradeInBackground(attempt.QuestionNumber);
+    }
+
+    // → Same avoid-list pattern as Quiz.razor (see IQuizProvider's recentPrompts
+    // doc comment): a stateless "write one question about X" prompt has no
+    // memory of what it already asked, so for a narrow topic/difficulty it
+    // tends to converge on the same "obvious" question. LoadNextQuestion was
+    // never passing this history to GetQuestionAsync — that's why timed quiz
+    // questions repeated even though the underlying provider already supports
+    // steering away from recent ones. In-memory only (not persisted to
+    // localStorage like Quiz.razor's) since a timed-quiz run is its own
+    // bounded session, reset every time one starts. The cap itself is
+    // Settings.AvoidListSize (student-configurable in Settings, shared with
+    // Quiz.razor) rather than a fixed constant — see QuizSettings'
+    // AvoidListSize doc comment for the tradeoff a bigger number means.
+    private readonly Queue<string> RecentPrompts = new();
+    private readonly Queue<bool> RecentFormats = new();
+
+    // → Stopwatch.ElapsedMilliseconds is just a value read at render time —
+    // Blazor never re-renders on its own as time passes. Without a periodic
+    // tick calling StateHasChanged, the on-screen timers only ever update
+    // when *something else* (e.g. the next question finishing its API call)
+    // happens to trigger a render, which looks like the clock is frozen and
+    // then jumps in lockstep with the question changing. This timer is the
+    // fix: it repaints the timers on their own schedule while a quiz is running.
+    private System.Threading.Timer? uiRefreshTimer;
+
+    // → OnInitializedAsync: initialize component state and start quiz immediately
+    // using settings from the home screen (model, difficulty, num questions)
+    protected override async Task OnInitializedAsync()
+    {
+        // Read settings from QuizSettings and build config.
+        //
+        // → Bug fix: this used to leave PreferredFormat at TimedQuizConfig's
+        // default (QuestionFormat.Any) instead of reading
+        // Settings.PreferredFormat — so a student with "Multiple choice
+        // only" set in Settings could still land on a free-text question
+        // when starting a timed quiz straight from the home screen (Any
+        // lets ClaudeQuizProvider.BuildToolsAndPrompt offer both the MCQ
+        // and short-answer tools with tool_choice: "auto" and leaves the
+        // pick to Claude). Quiz.razor already had this exact conversion via
+        // StringToQuestionFormat; TimedQuizConfigForm's own "Configure"
+        // screen also already sets PreferredFormat correctly — only this
+        // Quick-Start-from-Settings path was missing it.
+        CurrentConfig = new StudyAI.Models.TimedQuizConfig
+        {
+            NumQuestions = Settings.NumQuestions,
+            DifficultyFilter = Settings.DifficultyFilter,
+            PreferredFormat = StringToQuestionFormat(Settings.PreferredFormat)
+        };
+
+        // Set state to Running before starting (same as HandleConfigStart pattern)
+        State = TimedQuizState.Running;
+
+        // Start the quiz immediately
+        await StartQuiz();
+    }
+
+    private void StartUiRefreshTimer()
+    {
+        uiRefreshTimer?.Dispose();
+        uiRefreshTimer = new System.Threading.Timer(
+            _ => InvokeAsync(StateHasChanged),
+            null,
+            dueTime: TimeSpan.FromMilliseconds(250),
+            period: TimeSpan.FromMilliseconds(250));
+    }
+
+    private void StopUiRefreshTimer()
+    {
+        uiRefreshTimer?.Dispose();
+        uiRefreshTimer = null;
+    }
+
+    public void Dispose()
+    {
+        StopUiRefreshTimer();
+    }
+
+    private async Task HandleQuickStart()
+    {
+        CurrentConfig = StudyAI.Models.TimedQuizConfig.QuickStart();
+        State = TimedQuizState.Running;
+        await StartQuiz();
+    }
+
+    // → Show the config screen. This used to be an empty method — the comment
+    // claimed the config screen was "handled by setupComponent," but
+    // QuickStartOrConfigure never had that logic either, so clicking
+    // Configure did nothing at all. TimedQuizConfigForm is the actual screen.
+    private void HandleConfigure()
+    {
+        State = TimedQuizState.Configuring;
+    }
+
+    // → Student finished the config form and clicked Start Quiz.
+    private async Task HandleConfigStart(StudyAI.Models.TimedQuizConfig config)
+    {
+        CurrentConfig = config;
+        State = TimedQuizState.Running;
+        await StartQuiz();
+    }
+
+    private void HandleConfigCancel()
+    {
+        State = TimedQuizState.Setup;
+    }
+
+    private async Task StartQuiz()
+    {
+        // → Reset (not Restart) — the total-time clock doesn't actually
+        // start running until the first question has loaded; see the
+        // pause/resume around the fetch in LoadNextQuestion below.
+        QuizStopwatch.Reset();
+        QuestionStopwatch.Reset();
+
+        // → CurrentQuestion isn't touched anywhere else in this method, so
+        // without this line it kept whatever question the PREVIOUS quiz last
+        // showed — QuizRunner only renders its "Loading question..." spinner
+        // when Question is actually null, so during the fetch below the page
+        // showed the old quiz's last question (fully clickable, old timer
+        // still ticking) under a header that had already reset to "Question
+        // 0 of N." Nulling it here means LoadNextQuestion's IsLoadingQuestion
+        // window renders the real loading state instead of stale content.
+        CurrentQuestion = null;
+        Attempts.Clear();
+        MarkedForReview.Clear();
+        MarkedQuestionsFinalized = false;
+        QuestionNumber = 0;
+        RecentPrompts.Clear();
+        RecentFormats.Clear();
+        LoadError = null;
+        RecentNotice = null;
+        IsPaused = false;
+        ViewIndex = null;
+        LiveSelectedAnswer = "";
+        LiveIsMarked = false;
+        HistorySelectedAnswer = "";
+        IsSubmittingAnswer = false;
+        CurrentMaxTokens = InitialMaxTokens;
+        SessionCalls = 0;
+        SessionElapsedMs = 0;
+        SessionInputTokens = 0;
+        SessionOutputTokens = 0;
+
+        // → _prefetchTask needs no special handling beyond dropping the
+        // reference (see its own comment) — orphaning whatever was in
+        // flight is enough. _quizRunId/_pendingGradingTasks are the pair
+        // that actually needs resetting together: bumping the run id means
+        // any background grade that lands late for the PREVIOUS run will
+        // recognize itself as stale (see GradeInBackground) instead of
+        // writing into this fresh Attempts list, and clearing the pending
+        // list means HandleContinueToResults won't sit around awaiting
+        // tasks that belonged to a quiz that's already been abandoned.
+        _prefetchTask = null;
+        _quizRunId++;
+        _pendingGradingTasks.Clear();
+
+        StartUiRefreshTimer();
+
+        await LoadNextQuestion();
+    }
+
+    private async Task LoadNextQuestion()
+    {
+        // → Kept separate from the QuestionNumber field on purpose: the
+        // field drives what QuizRunner displays as "Question X of Y," and
+        // it shouldn't advance until the new question is actually ready —
+        // same reasoning as the scroll-to-top fix below, just applied to
+        // the counter instead of scroll position. nextQuestionNumber is
+        // only used to decide whether we're done and, once the fetch
+        // succeeds, to become the new QuestionNumber.
+        var nextQuestionNumber = QuestionNumber + 1;
+        if (nextQuestionNumber > CurrentConfig.NumQuestions)
+        {
+            // → Keep the timer running during review so the total elapsed
+            // time continues to update. Only stop it when moving to Results.
+            // Also drop any prefetch that was already in flight for a
+            // question we're never going to show — nothing will ever
+            // consume it, so there's no reason to keep the reference.
+            _prefetchTask = null;
+            State = TimedQuizState.ReviewMarked;
+            return;
+        }
+
+        IsLoadingQuestion = true;
+        LoadError = null;
+        RecentNotice = null;
+
+        // → Pause the total-time clock for the duration of the fetch — it
+        // should reflect the student's active time on questions, not API
+        // latency. Stop() is a harmless no-op the very first time, when the
+        // clock hasn't started yet. When a prefetch already finished this
+        // still costs nothing extra: the clock stops and restarts a few
+        // lines down almost immediately.
+        QuizStopwatch.Stop();
+
+        try
+        {
+            // → Consume whatever prefetch was already started for THIS
+            // question instead of kicking off a fresh fetch — see
+            // _prefetchTask's comment. Falls back to fetching now if
+            // nothing was queued (the very first question of the quiz, or
+            // the previous LoadNextQuestion call bailed out before it got a
+            // chance to start one — see the "Setup needed"/catch branches
+            // below). Grabbed and cleared together so a failure here can't
+            // leave a stale reference behind for the next call to trip on.
+            var fetchTask = _prefetchTask ?? FetchQuestionWithRetry();
+            _prefetchTask = null;
+
+            var result = await fetchTask;
+            foreach (var call in result.Calls)
+                RecordCall(call.ElapsedMs, call.InputTokens, call.OutputTokens);
+            if (result.RetryNotice is not null)
+                RecentNotice = result.RetryNotice;
+
+            var fetched = result.Question;
+
+            // → "Setup needed" is ErrorQuestion's sentinel topic (ClaudeQuizProvider) —
+            // GetQuestionAsync failed closed instead of throwing. Treat it the same
+            // as the catch block below: not a real question, don't advance the
+            // counter, don't touch the avoid-list, don't start the clocks. Just
+            // surface the failure so the student can retry without it costing them
+            // one of their N questions.
+            if (fetched.Topic == "Setup needed")
+            {
+                CurrentQuestion = null;
+                LoadError = fetched.Explanation;
+                return;
+            }
+
+            CurrentQuestion = fetched;
+            RecentPrompts.Enqueue(CurrentQuestion.Prompt);
+            while (RecentPrompts.Count > Settings.AvoidListSize)
+                RecentPrompts.Dequeue();
+
+            RecentFormats.Enqueue(CurrentQuestion.Choices.Count > 0);
+            while (RecentFormats.Count > Settings.AvoidListSize)
+                RecentFormats.Dequeue();
+
+            // → Scroll back to the top now that the new question is actually
+            // ready to display. This used to run at the very start of
+            // LoadNextQuestion, before the fetch — which meant the page
+            // jumped to the top while Blazor was still showing the OLD
+            // question, because CurrentQuestion doesn't actually change until
+            // the fetch above completes. That read as the page repositioning
+            // before anything had finished loading — most obvious right
+            // after Configure, where the longer setup form means a bigger,
+            // more jarring premature jump. Scrolling here means the jump and
+            // the new question's appearance happen as one motion.
+            try
+            {
+                await JS.InvokeVoidAsync("window.scrollTo", 0, 0);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Failed to scroll to top: {ex.Message}");
+            }
+
+            // → "Question X of Y" advances here, alongside the scroll and
+            // the new question itself — not at the top of this method —
+            // so the label can't flash ahead to the next number while the
+            // old question (or a bare loading state) is still on screen.
+            QuestionNumber = nextQuestionNumber;
+
+            // → Only start counting once the question has actually arrived
+            // and is about to be shown. Starting these before the fetch (as
+            // they did previously) meant however long the Claude API took
+            // to respond was silently counted as the student's time, before
+            // they'd even seen the question. QuizStopwatch.Start() resumes
+            // from wherever it left off rather than resetting, so it keeps
+            // accumulating only the time spent actively on questions across
+            // the whole quiz.
+            QuestionStopwatch.Restart();
+            QuizStopwatch.Start();
+
+            // → Now that this question is actually showing, get a head
+            // start on the NEXT one while the student reads/answers this
+            // one instead of waiting for them to click Next first — see
+            // _prefetchTask's comment. Deliberately not awaited. Only
+            // when there's actually a next question to get: on the last
+            // question of the quiz there's nothing left to prefetch.
+            // Controlled by Settings.PrefetchNextQuestion so students can
+            // experiment with the latency/cost tradeoff.
+            if (QuestionNumber < CurrentConfig.NumQuestions && Settings.PrefetchNextQuestion)
+                _prefetchTask = FetchQuestionWithRetry();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Failed to load next question: {ex.Message}");
+            CurrentQuestion = null;
+            LoadError = ex.Message;
+        }
+        finally
+        {
+            IsLoadingQuestion = false;
+        }
+    }
+
+    // → Does the actual fetch-plus-truncation-retry work for one question,
+    // WITHOUT touching RecordCall/RecentNotice — see FetchResult's comment
+    // for why. Used for both the live fetch inside LoadNextQuestion and the
+    // background prefetch it kicks off afterward, so neither path can step
+    // on the other's session stats or notice while its result is sitting
+    // unconsumed in _prefetchTask.
+    //
+    // CurrentMaxTokens itself IS mutated directly here rather than threaded
+    // through the result — it's a persistent, ratcheting budget that's
+    // never rendered, and there's only ever one fetch (live or prefetch) in
+    // flight at a time, so there's no concurrent-access race to worry about.
+    private async Task<FetchResult> FetchQuestionWithRetry()
+    {
+        var difficulty = StudyAI.Services.TimedQuizLogic.GetRandomDifficulty(CurrentConfig.DifficultyFilter);
+
+        async Task<StudyAI.Models.QuizQuestion> FetchQuestion() => await QuizProvider.GetQuestionAsync(
+            CurrentConfig.Topic == "" ? "Claude Certified Developer" : CurrentConfig.Topic,
+            difficulty: difficulty,
+            recentPrompts: RecentPrompts.ToList(),
+            recentWasMultipleChoice: RecentFormats.ToList(),
+            preferredFormat: CurrentConfig.PreferredFormat,
+            maxTokens: CurrentMaxTokens);
+
+        var calls = new List<ApiCallStats>();
+
+        var fetchStopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var fetched = await FetchQuestion();
+        calls.Add(new ApiCallStats(fetchStopwatch.ElapsedMilliseconds, fetched.InputTokens, fetched.OutputTokens));
+
+        // → A max_tokens truncation is the one failure worth retrying
+        // automatically — it's not "something is broken," it's "the
+        // budget was too tight for this particular question" (see
+        // ClaudeQuizProvider's max_tokens comment). Bump the budget and
+        // retry ONCE immediately; CurrentMaxTokens isn't reset until
+        // StartQuiz, so the bump also sticks for every later question in
+        // this run, making a truncation early on less likely to recur.
+        // Any other failure (no API key, network error, malformed body)
+        // isn't something a bigger budget fixes, so those still fall
+        // straight through to LoadNextQuestion's catch block, same as
+        // before this was pulled out into its own method.
+        string? retryNotice = null;
+        if (fetched.WasTruncated)
+        {
+            var previousMaxTokens = CurrentMaxTokens;
+            CurrentMaxTokens = StudyAI.Services.TimedQuizLogic.BumpMaxTokens(CurrentMaxTokens);
+            Console.Error.WriteLine($"FetchQuestionWithRetry: retrying with max_tokens={CurrentMaxTokens} after truncation");
+            retryNotice = $"Hit the token limit generating this question — retried with a bigger budget ({previousMaxTokens} → {CurrentMaxTokens} tokens).";
+            fetchStopwatch.Restart();
+            fetched = await FetchQuestion();
+            calls.Add(new ApiCallStats(fetchStopwatch.ElapsedMilliseconds, fetched.InputTokens, fetched.OutputTokens));
+        }
+
+        return new FetchResult(fetched, calls, retryNotice);
+    }
+
+    // → Wired to the pause button in this page's own .quiz-header. QuizRunner
+    // doesn't know or care about pausing at all anymore — pausing only ever
+    // affected the old Submit button's disabled state/label, and that button
+    // now lives here (see NextButtonLabel/CanClickNext), so there's nothing
+    // left to pass down. The actual stopwatch orchestration lives in
+    // TimedQuizLogic.TogglePause so it's unit tested directly — see
+    // StudyAI.Tests/TimedQuizLogicTests.cs.
+    private void HandleTogglePause()
+    {
+        IsPaused = StudyAI.Services.TimedQuizLogic.TogglePause(IsPaused, QuizStopwatch, QuestionStopwatch);
+    }
+
+    // → "Try again" on the load-error card — just retries the same fetch.
+    // nextQuestionNumber inside LoadNextQuestion is computed from the
+    // (unchanged) QuestionNumber field, so a failed attempt never consumed
+    // a slot and this retry is still asking for the same question position.
+    private async Task HandleRetryLoad()
+    {
+        await LoadNextQuestion();
+    }
+
+    // → Called from HandleNext's live branch with whatever LiveSelectedAnswer/
+    // LiveIsMarked held at the moment Next was clicked. Records the attempt
+    // ungraded, kicks off grading in the background (unless marked for
+    // review — see below) so it doesn't sit on the critical path to the
+    // next question, then loads the next question and clears
+    // LiveSelectedAnswer/LiveIsMarked. This used to happen inside
+    // QuizRunner's own SubmitAnswer, right after its OnAnswer callback
+    // returned; same timing, just here now since submission itself moved
+    // here.
+    private async Task HandleAnswer(string answer, bool markedForReview)
+    {
+        if (CurrentQuestion == null) return;
+
+        QuestionStopwatch.Stop();
+        var timeSpent = QuestionStopwatch.ElapsedMilliseconds;
+
+        // → Grade always starts null now — nothing in this method awaits
+        // GradeAsync directly anymore. Marked-for-review questions stay
+        // ungraded until HandleFinishMarked, same as before (grading them
+        // now would lock in an answer the student explicitly said they
+        // want another look at). Everything else gets graded by
+        // GradeInBackground, kicked off just below, which writes the real
+        // Grade back onto this attempt once it finishes — on its own
+        // schedule, not blocking the move to the next question.
+        var attempt = new StudyAI.Models.QuestionAttempt
+        {
+            QuestionNumber = QuestionNumber,
+            Question = CurrentQuestion,
+            UserAnswer = answer,
+            Grade = null,
+            TimeSpentMs = timeSpent,
+            MarkedForReview = markedForReview
+        };
+
+        Attempts.Add(attempt);
+        if (markedForReview)
+            MarkedForReview.Add(QuestionNumber - 1);
+        else
+            GradeInBackground(attempt.QuestionNumber);
+
+        await LoadNextQuestion();
+
+        LiveSelectedAnswer = "";
+        LiveIsMarked = false;
+    }
+
+    // → Grades one attempt without blocking whatever's already running
+    // (HandleAnswer's move to the next question, in practice) — the
+    // counterpart to _prefetchTask on the way OUT of a question instead of
+    // the way in. Deliberately fire-and-forget from the caller's side: this
+    // method itself does the awaiting, and records itself in
+    // _pendingGradingTasks so HandleContinueToResults has something to wait
+    // on as a safety net for whatever hasn't finished by then.
+    //
+    // Captures runId and the attempt itself synchronously, before the first
+    // await, so both are frozen at the moment grading was requested — by
+    // the time this resumes after GradeAsync, the student could easily have
+    // quit and started an entirely new quiz (see _quizRunId's comment), so
+    // nothing here can assume Attempts/QuestionNumber still mean what they
+    // meant when this was called.
+    private void GradeInBackground(int questionNumber)
+    {
+        var runId = _quizRunId;
+        var index = Attempts.FindIndex(a => a.QuestionNumber == questionNumber);
+        if (index < 0) return;
+        var attempt = Attempts[index];
+
+        async Task GradeAndApply()
+        {
+            var gradeStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var grade = await QuizProvider.GradeAsync(attempt.Question, attempt.UserAnswer);
+            var elapsedMs = gradeStopwatch.ElapsedMilliseconds;
+
+            // → The continuation from here on runs after a real async gap
+            // (the GradeAsync call above), so unlike the synchronous setup
+            // just above, it has no guarantee of being marshaled back onto
+            // the circuit's SynchronizationContext — InvokeAsync is the
+            // correct-by-construction way to mutate component state from
+            // here, the same reason StartUiRefreshTimer's callback needs it
+            // (see that comment).
+            await InvokeAsync(() =>
+            {
+                // → Stale: this grade belongs to a run the student has
+                // already left (quit and started a new quiz, or restarted).
+                // Applying it now would either write into the wrong
+                // question of a fresh Attempts list or, worse, land on a
+                // DIFFERENT question that happens to now sit at the same
+                // QuestionNumber. Just drop it.
+                if (runId != _quizRunId) return;
+
+                var currentIndex = Attempts.FindIndex(a => a.QuestionNumber == questionNumber);
+                if (currentIndex < 0) return;
+
+                RecordCall(elapsedMs, grade.InputTokens, grade.OutputTokens);
+                Attempts[currentIndex] = Attempts[currentIndex] with { Grade = grade };
+                StateHasChanged();
+            });
+        }
+
+        _pendingGradingTasks.Add(GradeAndApply());
+    }
+
+    // → Grade every marked-for-review question using its (possibly edited)
+    // final answer from the review screen, then let ReviewMarked switch from
+    // its editable phase into its read-only reveal phase. finalAnswers maps
+    // a marked question's index (QuestionNumber - 1, matching MarkedForReview)
+    // to whatever the student left in the box when they clicked Finish Quiz —
+    // that may be unchanged from their original answer, or a genuine revision.
+    private async Task HandleFinishMarked(Dictionary<int, string> finalAnswers)
+    {
+        foreach (var index in MarkedForReview)
+        {
+            var attemptIndex = Attempts.FindIndex(a => a.QuestionNumber == index + 1);
+            if (attemptIndex < 0)
+                continue;
+
+            var attempt = Attempts[attemptIndex];
+            var finalAnswer = finalAnswers.TryGetValue(index, out var edited) && !string.IsNullOrWhiteSpace(edited)
+                ? edited
+                : attempt.UserAnswer;
+
+            var gradeStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var grade = await QuizProvider.GradeAsync(attempt.Question, finalAnswer);
+            RecordCall(gradeStopwatch.ElapsedMilliseconds, grade.InputTokens, grade.OutputTokens);
+            Attempts[attemptIndex] = attempt with { UserAnswer = finalAnswer, Grade = grade };
+        }
+
+        MarkedQuestionsFinalized = true;
+    }
+
+    private void HandleQuit()
+    {
+        QuizStopwatch.Stop();
+        StopUiRefreshTimer();
+        State = TimedQuizState.ReviewMarked;
+    }
+
+    private async Task HandleContinueToResults()
+    {
+        QuizStopwatch.Stop();
+        StopUiRefreshTimer();
+
+        // → Safety net for whatever background grading (GradeInBackground)
+        // hasn't finished by the time the student gets here — in practice
+        // this list is usually already empty, since grading a single
+        // sentence is almost always faster than reading the rest of the
+        // quiz, but there's no guarantee of that for the very last
+        // question or a slow API response. Cleared afterward so a later
+        // quiz run doesn't inherit a stale (and by then irrelevant) list —
+        // though StartQuiz already does this too, belt and suspenders.
+        await Task.WhenAll(_pendingGradingTasks);
+        _pendingGradingTasks.Clear();
+
+        // → Build final results. Grade?.IsCorrect == true rather than
+        // Grade.IsCorrect: every attempt should be graded by this point
+        // (HandleFinishMarked and the await above both run before this is
+        // ever reachable), but this stays null-safe rather than trusting
+        // that invariant blindly.
+        int correct = Attempts.Count(a => a.Grade?.IsCorrect == true);
+        var breakdown = StudyAI.Services.TimedQuizLogic.BuildDifficultyBreakdown(Attempts);
+
+        QuizResult = new StudyAI.Models.TimedQuizResult
+        {
+            TotalQuestions = Attempts.Count,
+            CorrectAnswers = correct,
+            TotalTimeMs = QuizStopwatch.ElapsedMilliseconds,
+            Attempts = Attempts,
+            MarkedForReview = MarkedForReview,
+            CorrectByEasy = breakdown.CorrectByEasy,
+            TotalByEasy = breakdown.TotalByEasy,
+            CorrectByMedium = breakdown.CorrectByMedium,
+            TotalByMedium = breakdown.TotalByMedium,
+            CorrectByHard = breakdown.CorrectByHard,
+            TotalByHard = breakdown.TotalByHard,
+        };
+
+        State = TimedQuizState.Results;
+    }
+
+    private void HandleRestart()
+    {
+        StopUiRefreshTimer();
+        State = TimedQuizState.Setup;
+        QuizResult = null;
+        Attempts.Clear();
+        MarkedForReview.Clear();
+        MarkedQuestionsFinalized = false;
+    }
+
+    // → Same mapping Quiz.razor uses (StringToQuestionFormat) — kept here
+    // too rather than shared, since Settings.PreferredFormat is a plain
+    // string (bound directly to a <select> in Home.razor) while
+    // TimedQuizConfig.PreferredFormat is the QuestionFormat enum.
+    private static StudyAI.Models.QuestionFormat StringToQuestionFormat(string format) => format switch
+    {
+        "MultipleChoice" => StudyAI.Models.QuestionFormat.MultipleChoice,
+        "ShortAnswer" => StudyAI.Models.QuestionFormat.ShortAnswer,
+        _ => StudyAI.Models.QuestionFormat.Any
+    };
+}
+
+<style>
+    .load-error-card {
+        max-width: 800px;
+        margin: 0 auto;
+        background: white;
+        border: 1px solid #f3b8b8;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        padding: 2rem;
+        text-align: center;
+    }
+
+    .load-error-heading {
+        font-weight: 600;
+        color: #721c24;
+        margin: 0 0 0.5rem;
+        font-size: 1.1rem;
+    }
+
+    .load-error-detail {
+        color: #666;
+        font-size: 0.9rem;
+        margin: 0 0 1.5rem;
+    }
+
+    .load-error-actions {
+        display: flex;
+        gap: 1rem;
+        justify-content: center;
+    }
+
+    .load-error-actions .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: 500;
+        cursor: pointer;
+    }
+
+    .load-error-actions .btn-primary {
+        background-color: #0066cc;
+        color: white;
+    }
+
+    .load-error-actions .btn-primary:hover {
+        background-color: #0052a3;
+    }
+
+    /* → RecentNotice's styling — deliberately calmer than .load-error-card:
+       this isn't a failure the student needs to act on, it's informational
+       (the app already retried and it worked), so it reads as "FYI" rather
+       than "something's wrong." */
+    .session-notice {
+        display: inline-block;
+        margin-top: 0.4rem;
+        padding: 0.4rem 0.6rem;
+        font-size: 0.8rem;
+        color: #92620a;
+        background: #fff8e6;
+        border: 1px solid #f2dfa0;
+        border-radius: 4px;
+    }
+
+    /* → .quiz-header/.progress-info/.question-counter/.nav-btn/.quit-btn/
+       .answer-nav-footer now all live in app.css — see its "Shared
+       quiz-runner visual language" comment. This page still owns the
+       progress bar and timer/pause cluster, which are unique to Timed
+       Quiz (Regular Quiz has no fixed question count and no clock). */
+
+    /* → Prefixed header- rather than the generic .progress-bar/.progress-fill
+       DifficultyBar.razor also uses — Blazor's plain style blocks aren't
+       CSS-isolated the way a companion .razor.css file would be, so any two
+       components using the same class name share ONE global rule between
+       them. These two used to collide: shrinking this bar down for the
+       sticky header (see the header-sizing history above) also shrank
+       DifficultyBar's much taller results-screen bars down to the same 5px,
+       leaving the "100%" label crushed into an unreadable sliver. Unique
+       names here are the fix — DifficultyBar's own .progress-bar/.progress-fill
+       rules are untouched and no longer share a name with anything. */
+    .header-progress-bar {
+        height: 5px;
+        background: #f0f0f0;
+        border-radius: 3px;
+        overflow: hidden;
+        width: 100%;
+        max-width: 140px;
+    }
+
+    .header-progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #0066cc, #0052a3);
+        transition: width 0.3s ease;
+    }
+
+    .timer-group {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+    }
+
+    .timer {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .timer-label {
+        font-size: 0.65rem;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .timer-value {
+        font-size: 1rem;
+        font-weight: bold;
+        color: #0066cc;
+        font-family: monospace;
+    }
+
+    .pause-btn {
+        background: none;
+        border: 1px solid #ccc;
+        border-radius: 50%;
+        width: 1.8rem;
+        height: 1.8rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #0066cc;
+        transition: background 0.2s ease;
+    }
+
+    .pause-btn:hover:not(:disabled) {
+        background: #f0f0f0;
+    }
+
+    .pause-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
+</style>

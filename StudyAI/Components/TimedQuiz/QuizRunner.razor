@@ -1,0 +1,277 @@
+@* QuizRunner.razor
+    Displays a question card: MCQ/short-answer input, difficulty badge, and
+    (optionally) a Mark for Review checkbox. Used for both the live question
+    and, via a second instance, whichever historical attempt Previous/Next is
+    currently browsing — see TimedQuiz.razor.
+
+    This component no longer owns any buttons at all — no Submit/Next
+    Question, no Quit. TimedQuiz.razor's single Previous/Next row at the
+    bottom of the page (see .answer-nav-footer) now does that job for both
+    modes: live, it submits SelectedAnswer and advances; browsing history,
+    it saves SelectedAnswer if it differs from the stored answer and moves
+    the view. That's also why SelectedAnswer/IsMarked are bound parameters
+    instead of local fields the old Submit button read directly — the parent
+    needs to know the current pick to decide whether Next is even clickable,
+    and to know what to submit/save when it's clicked.
+*@
+
+@if (Question == null)
+{
+    <div class="loading-indicator">
+        <div class="spinner"></div>
+        <p class="loading-text">Loading question…</p>
+    </div>
+}
+else
+{
+    <div class="quiz-runner">
+        <div class="question-card">
+            <div class="question-header">
+                @if (!string.IsNullOrEmpty(Question.Difficulty))
+                {
+                    <span class="difficulty-badge @Question.Difficulty.ToLower()">@Question.Difficulty</span>
+                }
+                <span class="question-type">@(Question.Choices != null && Question.Choices.Count > 0 ? "Multiple Choice" : "Short Answer")</span>
+            </div>
+
+            @* → Topic tag under the difficulty badge, matching Quiz.razor's
+                 question card layout (same .topic-tag class from app.css) —
+                 TimedQuiz didn't surface which topic a question came from at
+                 all, which stands out more here than in Regular Quiz since a
+                 mixed-topic run (Topic == "" — random across all) can jump
+                 topics question to question. *@
+            <p class="topic-tag">@Question.Topic</p>
+
+            <h2 class="question-text">@Question.Prompt</h2>
+
+            <!-- Multiple Choice Options -->
+            @if (Question.Choices != null && Question.Choices.Count > 0)
+            {
+                <div class="options-container">
+                    @foreach (var option in Question.Choices)
+                    {
+                        var isSelected = SelectedAnswer == option;
+                        var isEliminated = eliminatedChoices.Contains(option);
+                        <div class="option-row">
+                            <button class="option-button @(isSelected ? "selected" : "") @(isEliminated ? "eliminated" : "")"
+                                    disabled="@isEliminated"
+                                    @onclick="() => SelectAnswer(option)">
+                                <span class="option-radio">
+                                    @if (isSelected)
+                                    {
+                                        <span class="selected-indicator">✓</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="radio-circle"></span>
+                                    }
+                                </span>
+                                <span class="option-text">@option</span>
+                            </button>
+                            <button type="button" class="eliminate-btn" title="Cross out"
+                                    @onclick="() => ToggleEliminate(option)">
+                                @(isEliminated ? "↺" : "✕")
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <!-- Short Answer Input -->
+                <div class="short-answer-container">
+                    <textarea class="short-answer-input"
+                              value="@SelectedAnswer"
+                              @oninput="(ChangeEventArgs e) => SelectedAnswerChanged.InvokeAsync((string)e.Value!)"
+                              placeholder="Enter your answer..."
+                              rows="6"></textarea>
+                </div>
+            }
+
+            @if (ShowMarkForReview)
+            {
+                <!-- Mark for Review Checkbox -->
+                <div class="review-section">
+                    <label class="checkbox-label">
+                        <input type="checkbox" checked="@IsMarked" @onchange="(ChangeEventArgs e) => IsMarkedChanged.InvokeAsync((bool)e.Value!)" />
+                        <span class="checkbox-text">Mark for review</span>
+                    </label>
+                    <span class="hint">Keeps this question ungraded until you finish the quiz</span>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter]
+    public StudyAI.Models.QuizQuestion Question { get; set; } = null!;
+
+    // → Only needed for the eliminatedChoices reset below — see
+    // OnParametersSet. Nothing here renders it directly.
+    [Parameter]
+    public int QuestionNumber { get; set; }
+
+    // → The current pick and its two-way binding back to the parent.
+    // "" (live, nothing chosen yet) or an attempt's stored UserAnswer
+    // (history mode, preselecting what was already answered). The parent
+    // (TimedQuiz.razor) is what actually resets this to the right value
+    // when the question changes — see LoadNextQuestion/GoToPrevious/
+    // GoToNext/StartQuiz — since it already owns every place that happens.
+    [Parameter]
+    public string SelectedAnswer { get; set; } = "";
+
+    [Parameter]
+    public EventCallback<string> SelectedAnswerChanged { get; set; }
+
+    [Parameter]
+    public bool IsMarked { get; set; }
+
+    [Parameter]
+    public EventCallback<bool> IsMarkedChanged { get; set; }
+
+    // → Hides the Mark for Review row. Off in history mode — retroactively
+    // marking/unmarking an already-submitted attempt raises its own
+    // questions (does unmarking grade it immediately? does marking un-grade
+    // it?) that nothing here currently handles, so it's simplest to just not
+    // offer it while browsing rather than offer something half-wired.
+    [Parameter]
+    public bool ShowMarkForReview { get; set; } = true;
+
+    // Process-of-elimination scratch marks (cross-out) — purely visual/local
+    // to the current question, same feature as Quiz.razor's EliminatedChoices.
+    // Doesn't affect grading, and doesn't need to round-trip through the
+    // parent the way SelectedAnswer/IsMarked do.
+    private readonly HashSet<string> eliminatedChoices = new();
+    private int? lastRenderedQuestionNumber;
+
+    // → The only reset this component still does on its own. Selection and
+    // mark-for-review used to be reset here too, via a QuestionNumber
+    // comparison standing in for "did the question actually change" — see
+    // git history for why ReferenceEquals on Question didn't work for that.
+    // Now that SelectedAnswer/IsMarked are parent-owned, the parent resets
+    // them directly at the moment it changes the question instead of this
+    // component reactively detecting the change after the fact — one less
+    // place relying on parameter-diffing to get identity right. Cross-out
+    // marks are low-stakes enough (cosmetic only, never affects grading or
+    // what shows as selected) that they're not worth lifting to the parent
+    // for the same treatment; the QuestionNumber-keyed reset that already
+    // proved itself for the bigger job still fits fine here.
+    protected override void OnParametersSet()
+    {
+        if (QuestionNumber != lastRenderedQuestionNumber)
+        {
+            lastRenderedQuestionNumber = QuestionNumber;
+            eliminatedChoices.Clear();
+        }
+    }
+
+    private async Task SelectAnswer(string option) => await SelectedAnswerChanged.InvokeAsync(option);
+
+    private async Task ToggleEliminate(string option)
+    {
+        if (!eliminatedChoices.Remove(option))
+            eliminatedChoices.Add(option);
+
+        if (SelectedAnswer == option && eliminatedChoices.Contains(option))
+            await SelectedAnswerChanged.InvokeAsync("");
+    }
+}
+
+<style>
+    .loading-indicator {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        min-height: 400px;
+        color: #666;
+        max-width: 800px;
+        margin: 0 auto;
+    }
+
+    .quiz-runner {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 2rem;
+    }
+
+    .question-card {
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        padding: 2rem;
+        margin-bottom: 2rem;
+    }
+
+    /* → .question-header/.difficulty-badge/.question-type now live in
+       app.css — see its "Shared quiz-runner visual language" comment. */
+
+    .question-text {
+        margin: 0 0 1.5rem 0;
+        font-size: 1.3rem;
+        color: #333;
+        line-height: 1.5;
+    }
+
+    /* → .options-container/.option-row/.option-button (+ hover/selected/
+       eliminated states)/.option-radio/.selected-indicator/.radio-circle/
+       .option-text, and .eliminate-btn, all now live in app.css — see its
+       "Shared quiz-runner visual language" comment. */
+
+    .short-answer-container {
+        margin-bottom: 1.5rem;
+    }
+
+    .short-answer-input {
+        width: 100%;
+        padding: 1rem;
+        border: 2px solid #e0e0e0;
+        border-radius: 6px;
+        font-family: inherit;
+        font-size: 1rem;
+        resize: vertical;
+        transition: border-color 0.2s ease;
+    }
+
+    .short-answer-input:focus {
+        outline: none;
+        border-color: #0066cc;
+        box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+    }
+
+    .review-section {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 1rem;
+        background: #f9f9f9;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+    }
+
+    .checkbox-label {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        cursor: pointer;
+        margin: 0;
+        flex: 1;
+    }
+
+    .checkbox-label input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+    }
+
+    .checkbox-text {
+        font-weight: 500;
+        color: #333;
+    }
+
+    .hint {
+        font-size: 0.85rem;
+        color: #999;
+    }
+</style>

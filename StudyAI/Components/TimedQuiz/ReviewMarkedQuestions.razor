@@ -1,0 +1,46 @@
+@* ReviewMarkedQuestions.razor
+    Thin dispatcher between the two phases of the review-marked step:
+    - No marked questions at all → straight to the (empty) reveal, nothing to edit.
+    - Marked questions, not yet finalized → ReviewMarkedEditor (re-answerable,
+      no grading shown yet).
+    - Marked questions, finalized (graded via Finish Quiz) → ReviewMarkedReveal
+      (read-only correct/incorrect detail).
+    This mirrors why the cross-out feature lives in its own state inside
+    QuizRunner rather than the parent: TimedQuiz.razor owns the *data*
+    (Attempts, MarkedQuestionsFinalized), these components own how it's *shown*.
+*@
+
+@if (MarkedIndices.Count > 0 && !MarkedQuestionsFinalized)
+{
+    <ReviewMarkedEditor Attempts="Attempts"
+                        MarkedIndices="MarkedIndices"
+                        OnFinish="OnFinishMarked"
+                        OnRestart="OnRestart" />
+}
+else
+{
+    <ReviewMarkedReveal Attempts="Attempts"
+                        MarkedIndices="MarkedIndices"
+                        OnContinue="OnContinue"
+                        OnRestart="OnRestart" />
+}
+
+@code {
+    [Parameter]
+    public List<StudyAI.Models.QuestionAttempt> Attempts { get; set; } = new();
+
+    [Parameter]
+    public List<int> MarkedIndices { get; set; } = new();
+
+    [Parameter]
+    public bool MarkedQuestionsFinalized { get; set; }
+
+    [Parameter]
+    public EventCallback<Dictionary<int, string>> OnFinishMarked { get; set; }
+
+    [Parameter]
+    public EventCallback OnContinue { get; set; }
+
+    [Parameter]
+    public EventCallback OnRestart { get; set; }
+}

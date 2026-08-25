@@ -1,0 +1,341 @@
+@* ReviewMarkedReveal.razor
+    Read-only reveal phase of the review-marked step — shown only after every
+    marked question has actually been graded (ReviewMarkedQuestions only
+    mounts this once MarkedQuestionsFinalized is true, or immediately if
+    nothing was marked). Same information Quiz.razor shows after grading:
+    correct/incorrect, the student's final answer vs. the correct one, and
+    the explanation.
+*@
+
+<div class="review-marked-container">
+    <div class="review-header">
+        <h2>Review Marked Questions</h2>
+        <p class="subtitle">Here's how your marked questions were graded.</p>
+    </div>
+
+    @if (MarkedIndices.Count == 0)
+    {
+        <div class="no-marked-card">
+            <p>No questions marked for review.</p>
+            <p class="hint">Click the button below to continue to your results.</p>
+        </div>
+    }
+    else
+    {
+        <div class="marked-questions-list">
+            @foreach (var index in MarkedIndices)
+            {
+                var attempt = Attempts.FirstOrDefault(a => a.QuestionNumber == index + 1);
+                if (attempt != null)
+                {
+                    var isCorrect = attempt.Grade?.IsCorrect == true;
+                    <div class="marked-question-card">
+                        <div class="card-header">
+                            <span class="question-label">Question @attempt.QuestionNumber</span>
+                            <span class="result-badge @(isCorrect ? "correct" : "incorrect")">
+                                @(isCorrect ? "✓ Correct" : "✗ Incorrect")
+                            </span>
+                        </div>
+
+                        <div class="question-content">
+                            <h3>@attempt.Question.Prompt</h3>
+
+                            @if (attempt.Question.Choices != null && attempt.Question.Choices.Count > 0)
+                            {
+                                <div class="answer-info">
+                                    <p><strong>Your answer:</strong> @attempt.UserAnswer</p>
+                                    <p><strong>Correct answer:</strong> @attempt.Question.CorrectAnswer</p>
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="answer-info">
+                                    <p><strong>Your answer:</strong></p>
+                                    <div class="user-answer-box">@attempt.UserAnswer</div>
+                                    <p><strong>Expected answer:</strong></p>
+                                    <div class="expected-answer-box">@attempt.Question.CorrectAnswer</div>
+                                </div>
+                            }
+
+                            @if (!string.IsNullOrEmpty(attempt.Grade?.Explanation))
+                            {
+                                <div class="explanation-box">
+                                    <strong>Explanation:</strong>
+                                    <p>@attempt.Grade!.Explanation</p>
+                                </div>
+                            }
+                        </div>
+
+                        <div class="card-footer">
+                            <span class="time-info">
+                                ⏱️ @($"{TimeSpan.FromMilliseconds(attempt.TimeSpentMs).TotalSeconds:F1}s")
+                            </span>
+                            @if (!string.IsNullOrEmpty(attempt.Question.Difficulty))
+                            {
+                                <span class="difficulty-badge @attempt.Question.Difficulty.ToLower()">
+                                    @attempt.Question.Difficulty
+                                </span>
+                            }
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    }
+
+    <!-- Action Buttons -->
+    <div class="action-buttons">
+        <button class="btn btn-primary" @onclick="OnContinue">
+            Continue to Results
+        </button>
+
+        <button class="btn btn-outline" @onclick="OnRestart">
+            Start Over
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public List<StudyAI.Models.QuestionAttempt> Attempts { get; set; } = new();
+
+    [Parameter]
+    public List<int> MarkedIndices { get; set; } = new();
+
+    [Parameter]
+    public EventCallback OnContinue { get; set; }
+
+    [Parameter]
+    public EventCallback OnRestart { get; set; }
+}
+
+<style>
+    .review-marked-container {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 2rem;
+    }
+
+    .review-header {
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+
+    .review-header h2 {
+        margin: 0 0 0.5rem 0;
+        color: #333;
+        font-size: 1.8rem;
+    }
+
+    .subtitle {
+        color: #666;
+        font-size: 1rem;
+        margin: 0;
+    }
+
+    .no-marked-card {
+        background: #f9f9f9;
+        border: 2px dashed #ddd;
+        border-radius: 8px;
+        padding: 2rem;
+        text-align: center;
+        margin-bottom: 2rem;
+        color: #666;
+    }
+
+    .no-marked-card p {
+        margin: 0.5rem 0;
+    }
+
+    .hint {
+        font-size: 0.9rem;
+        color: #999;
+    }
+
+    .marked-questions-list {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+
+    .marked-question-card {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+
+    .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        background: #f9f9f9;
+        border-bottom: 1px solid #e0e0e0;
+    }
+
+    .question-label {
+        font-weight: 600;
+        color: #333;
+    }
+
+    .result-badge {
+        padding: 0.35rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .result-badge.correct {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .result-badge.incorrect {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .question-content {
+        padding: 1.5rem;
+    }
+
+    .question-content h3 {
+        margin: 0 0 1rem 0;
+        color: #333;
+        font-size: 1.1rem;
+        line-height: 1.5;
+    }
+
+    .answer-info {
+        margin-bottom: 1rem;
+    }
+
+    .answer-info p {
+        margin: 0.5rem 0;
+        color: #666;
+    }
+
+    .answer-info strong {
+        color: #333;
+    }
+
+    .user-answer-box,
+    .expected-answer-box {
+        background: #f9f9f9;
+        border-left: 3px solid #0066cc;
+        padding: 0.75rem 1rem;
+        border-radius: 4px;
+        margin: 0.75rem 0 0.75rem 0;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .expected-answer-box {
+        border-left-color: #28a745;
+    }
+
+    .explanation-box {
+        background: #f0f6ff;
+        border-left: 3px solid #0066cc;
+        padding: 1rem;
+        border-radius: 4px;
+        margin-top: 1rem;
+    }
+
+    .explanation-box strong {
+        color: #0066cc;
+    }
+
+    .explanation-box p {
+        margin: 0.5rem 0 0 0;
+        color: #666;
+        line-height: 1.5;
+    }
+
+    .card-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 1rem 1.5rem;
+        background: #f9f9f9;
+        border-top: 1px solid #e0e0e0;
+        font-size: 0.9rem;
+        color: #999;
+    }
+
+    .time-info {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .difficulty-badge {
+        padding: 0.35rem 0.75rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .difficulty-badge.easy {
+        background: #d4edda;
+        color: #155724;
+    }
+
+    .difficulty-badge.medium {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .difficulty-badge.hard {
+        background: #f8d7da;
+        color: #721c24;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 1rem;
+        margin-top: 2rem;
+    }
+
+    .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        font-size: 1rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        flex: 1;
+    }
+
+    .btn-primary {
+        background-color: #0066cc;
+        color: white;
+    }
+
+    .btn-primary:hover {
+        background-color: #0052a3;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+    }
+
+    .btn-outline {
+        background: white;
+        color: #666;
+        border: 1px solid #ddd;
+    }
+
+    .btn-outline:hover {
+        background: #f9f9f9;
+        border-color: #999;
+    }
+</style>

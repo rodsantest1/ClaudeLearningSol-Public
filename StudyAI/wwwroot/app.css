@@ -1,0 +1,607 @@
+body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    background: #f7f7f8;
+    color: #1a1a1a;
+}
+
+main {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+.home h1, .quiz h1 {
+    margin-bottom: 0.25rem;
+}
+
+/* Shared by Quiz.razor and TimedQuiz.razor — a way back to the home screen
+   to pick the other quiz mode, without having to use the browser's back
+   button (which, for TimedQuiz, would step back through mid-quiz state). */
+.back-link {
+    display: inline-block;
+    margin-bottom: 0.75rem;
+    color: #6a35ff;
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.back-link:hover {
+    text-decoration: underline;
+}
+
+.btn {
+    display: inline-block;
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    background: #6a35ff;
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+}
+
+.topic-row, .input-row {
+    display: flex;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.topic-row input, .input-row textarea {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-family: inherit;
+}
+
+.input-row textarea {
+    resize: vertical;
+    min-height: 2.5rem;
+}
+
+button {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    background: #6a35ff;
+    color: white;
+    cursor: pointer;
+}
+
+button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.topic-row select {
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+}
+
+.question {
+    background: white;
+    border: 1px solid #e2e2e2;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+}
+
+.question.loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    padding: 4rem 2rem;
+    min-height: 300px;
+    color: #888;
+}
+
+.spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid #f0f0f0;
+    border-top-color: #6a35ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.loading-text {
+    font-size: 1rem;
+    margin: 0;
+    color: #666;
+}
+
+.question-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.topic-tag {
+    display: inline-block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: #6a35ff;
+    margin: 0 0 0.25rem;
+}
+
+/* → Sized to match TimedQuiz's QuizRunner.razor .question-text — Regular
+   Quiz used to render this noticeably smaller/lighter than Timed Quiz's
+   equivalent. Only Quiz.razor uses .prompt, so safe to change here rather
+   than overriding with a page-scoped selector. */
+.prompt {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #333;
+    line-height: 1.5;
+    margin: 0 0 1.5rem;
+}
+
+.timing {
+    font-size: 0.75rem;
+    color: #999;
+    margin: -0.5rem 0 0.5rem;
+}
+
+/* → Sized to match TimedQuiz's QuizRunner.razor .short-answer-input — was
+   noticeably smaller/tighter than Timed Quiz's free-text field. */
+.freetext-answer {
+    display: block;
+    width: 100%;
+    min-height: 6rem;
+    padding: 1rem;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 1rem;
+    resize: vertical;
+    box-sizing: border-box;
+    transition: border-color 0.2s ease;
+}
+
+.freetext-answer:focus {
+    outline: none;
+    border-color: #6a35ff;
+    box-shadow: 0 0 0 3px rgba(106, 53, 255, 0.1);
+}
+
+.freetext-answer:disabled {
+    background: #f7f7f8;
+    color: #777;
+}
+
+/* → Single shared definition — used by both Quiz.razor's .option-row and
+   QuizRunner.razor's .option-row (TimedQuiz). Each of those .razor files
+   used to carry its own extra .eliminate-btn override on top of this base
+   rule, and since Blazor's plain <style> blocks aren't CSS-isolated
+   between components, all three rules landed in one global stylesheet at
+   the same specificity — which one "won" depended on bundling order, not
+   which page was showing, so the button's size/height quietly drifted out
+   of sync between Regular and Timed Quiz. One definition here is now the
+   only source of truth — see CLAUDE.md's shared-style-block lesson.
+   Fixed 2.5rem square with align-self: center rather than stretching to
+   the option row's full height — .option-row's align-items: stretch
+   makes the row match .option-button's height, and Claude-generated
+   options can run to several wrapped lines (long enough to wrap past a
+   single line, unlike TimedQuiz's usually-shorter options), which made a
+   stretched button balloon into a tall pill next to a short "X". A fixed
+   square, vertically centered in the row, reads as a button at any
+   option length instead of pinning it to the top edge. */
+.eliminate-btn {
+    background: #fdeaea;
+    color: #e0342d;
+    border: 1px solid #f6c6c6;
+    border-radius: 6px;
+    width: 2.5rem;
+    height: 2.5rem;
+    align-self: center;
+    padding: 0;
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.eliminate-btn:hover {
+    background: #fbd8d8;
+    color: #c62828;
+}
+
+/* → Shared quiz-runner visual language — the sticky progress header,
+   Previous/Next footer, question header (difficulty badge + format
+   label), and MCQ option buttons. Used by Quiz.razor (Regular Quiz),
+   QuizRunner.razor, and TimedQuiz.razor. Consolidated here as the single
+   source of truth for the same reason .eliminate-btn was above: plain
+   <style> blocks inside .razor files aren't CSS-isolated between
+   components, so two components declaring the same class name (even with
+   different values) collapse into ONE global rule, and which value wins
+   depends on bundling order, not which page is showing. Regular Quiz and
+   Timed Quiz each used to carry their own slightly-different copies of
+   every rule below (purple vs. blue accents, different paddings, a
+   .btn-next that meant two different colors depending on load order) —
+   this is the fix. Blue (Timed Quiz's accent) is canonical throughout,
+   since "make Regular Quiz look like Timed Quiz" is the point of
+   consolidating these in the first place. */
+
+.quiz-header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    max-width: 800px;
+    margin: 0 auto 1.5rem;
+    padding: 0.6rem 1rem;
+    background: #fff;
+    border: 1px solid #eee;
+    border-radius: 6px;
+    position: sticky;
+    top: 0;
+    z-index: 11;
+}
+
+.progress-info {
+    flex: 1;
+    min-width: 110px;
+}
+
+.question-counter {
+    display: block;
+    font-size: 0.8rem;
+    color: #666;
+    margin-bottom: 0.3rem;
+    white-space: nowrap;
+}
+
+.question-counter strong {
+    font-weight: 600;
+    color: #333;
+}
+
+.nav-btn {
+    padding: 0.35rem 0.6rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: white;
+    color: #0066cc;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.nav-btn:hover:not(:disabled) {
+    background: #f0f6ff;
+    border-color: #0066cc;
+}
+
+.nav-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    color: #999;
+}
+
+.quit-btn {
+    padding: 0.4rem 0.7rem;
+    border: 1px solid #f3b8b8;
+    border-radius: 6px;
+    background: white;
+    color: #c0392b;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+}
+
+.quit-btn:hover:not(:disabled) {
+    background: #fdeaea;
+    border-color: #e0342d;
+}
+
+.quit-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* → Previous (left, natural width) / Skip + Next (right, grouped in
+   .answer-nav-footer-right so Regular Quiz's extra Skip button has
+   somewhere to sit) — the merged bottom-of-question row both quiz modes
+   share. .btn-next keeps Timed Quiz's original flex: 1 so it still reads
+   as the wide primary action rather than shrinking to fit its text — for
+   Timed Quiz (no wrapper, btn-next is a direct sibling of Previous) that
+   fills the row directly; for Regular Quiz, .answer-nav-footer-right's
+   own flex: 1 claims that same remaining space first, and btn-next then
+   fills whatever's left of THAT after Skip's natural width. */
+.answer-nav-footer {
+    max-width: 800px;
+    margin: 0 auto 2rem;
+    display: flex;
+    gap: 1rem;
+}
+
+.answer-nav-footer .nav-btn {
+    padding: 0.6rem 1rem;
+    font-size: 0.9rem;
+}
+
+.answer-nav-footer-right {
+    display: flex;
+    gap: 0.75rem;
+    flex: 1;
+}
+
+.answer-nav-footer .btn-next {
+    flex: 1;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 6px;
+    background-color: #0066cc;
+    color: white;
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.answer-nav-footer .btn-next:hover:not(:disabled) {
+    background-color: #0052a3;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+}
+
+.answer-nav-footer .btn-next:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.question-header {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.difficulty-badge {
+    padding: 0.35rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.difficulty-badge.easy {
+    background: #d4edda;
+    color: #155724;
+}
+
+.difficulty-badge.medium {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.difficulty-badge.hard {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.question-type {
+    font-size: 0.85rem;
+    color: #999;
+    margin-left: auto;
+}
+
+.options-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.option-row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.5rem;
+}
+
+.option-button {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    padding: 1rem;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+    font-size: 1rem;
+    font-family: inherit;
+}
+
+.option-button:hover:not(:disabled) {
+    border-color: #0066cc;
+    background: #f9f9f9;
+}
+
+.option-button:disabled {
+    cursor: default;
+}
+
+.option-button.selected {
+    border-color: #0066cc;
+    background: #f0f6ff;
+}
+
+.option-button.eliminated {
+    cursor: not-allowed;
+    opacity: 0.65;
+    background: #f7f7f7;
+}
+
+.option-button.eliminated .option-text {
+    text-decoration: line-through;
+    text-decoration-color: #e0a5ae;
+    color: #999;
+}
+
+.option-radio {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    margin-right: 1rem;
+    border: 2px solid #ddd;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.option-button.selected .option-radio {
+    border-color: #0066cc;
+    background: #0066cc;
+    color: white;
+    font-size: 0.8rem;
+}
+
+.selected-indicator {
+    font-weight: bold;
+}
+
+.radio-circle {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: transparent;
+}
+
+.option-text {
+    flex: 1;
+    color: #333;
+}
+
+.review-btn {
+    background: none;
+    color: #6a35ff;
+    border: 1px solid #d8cdfa;
+    border-radius: 6px;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.review-btn.active {
+    background: #fff6d8;
+    color: #8a6d00;
+    border-color: #f0dd8a;
+}
+
+.question button:not(.eliminate-btn):not(.review-btn) {
+    margin-top: 0.75rem;
+}
+
+.marked-list {
+    background: #fff6d8;
+    border: 1px solid #f0dd8a;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-top: 1rem;
+}
+
+.marked-heading {
+    margin: 0 0 0.4rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #8a6d00;
+}
+
+.marked-list ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.85rem;
+    color: #555;
+}
+
+.marked-list li {
+    margin: 0.2rem 0;
+}
+
+.marked-topic {
+    font-weight: 600;
+    color: #8a6d00;
+}
+
+.result {
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.result.correct {
+    background: #e6f6ea;
+    border: 1px solid #b6e3c2;
+}
+
+.result.incorrect {
+    background: #fdecec;
+    border: 1px solid #f3b8b8;
+}
+
+/* Neutral, not red — a failed grade (truncated/unparseable response) isn't
+   the same as a wrong answer, and shouldn't look like one. */
+.result.failed {
+    background: #f1f1f1;
+    border: 1px solid #d0d0d0;
+}
+
+.result p {
+    margin: 0.3rem 0 0;
+}
+
+.score {
+    font-size: 0.9rem;
+    color: #555;
+}
+
+.session-stats {
+    font-size: 0.8rem;
+    color: #888;
+    margin-top: 0.25rem;
+}
+
+.recommendation {
+    background: #f2edff;
+    border: 1px solid #d8cdfa;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-top: 0.75rem;
+}
+
+.recommendation-label {
+    margin: 0 0 0.3rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #6a35ff;
+}
+
+.recommendation p {
+    margin: 0 0 0.5rem;
+}
+
+.recommendation button {
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+}
