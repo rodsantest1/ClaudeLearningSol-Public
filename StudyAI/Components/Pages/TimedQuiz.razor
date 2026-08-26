@@ -185,7 +185,7 @@
 </div>
 
 @code {
-    private enum TimedQuizState { Setup, Configuring, Running, ReviewMarked, Results }
+    private enum TimedQuizState { Running, ReviewMarked, Results }
 
     // → What FetchQuestionWithRetry hands back, instead of touching
     // RecordCall/RecentNotice itself. This method is used for BOTH the
@@ -205,8 +205,7 @@
     // (the original attempt plus the retry) belong to one FetchResult.
     private record ApiCallStats(long ElapsedMs, int? InputTokens, int? OutputTokens);
 
-    private TimedQuizState State = TimedQuizState.Setup;
-    private QuickStartOrConfigure? setupComponent;
+    private TimedQuizState State = TimedQuizState.Running;
     private StudyAI.Models.TimedQuizConfig CurrentConfig = StudyAI.Models.TimedQuizConfig.QuickStart();
     private StudyAI.Models.TimedQuizResult? QuizResult;
 
@@ -564,34 +563,35 @@
     // fix: it repaints the timers on their own schedule while a quiz is running.
     private System.Threading.Timer? uiRefreshTimer;
 
-    // → OnInitializedAsync: initialize component state and start quiz immediately
-    // using settings from the home screen (model, difficulty, num questions)
+    // → Builds a TimedQuizConfig from the home screen's Settings panel —
+    // the single source of truth for model/difficulty/question count/format
+    // now that the in-page Quick Start/Configure screen is gone (that
+    // screen's own knobs were a redundant second place to set the same
+    // options). Shared by OnInitializedAsync (first visit) and HandleRestart
+    // (starting another quiz) so both pick up whatever Settings currently
+    // says, including any changes made between quizzes.
+    //
+    // → Bug fix, preserved from the original OnInitializedAsync: this used
+    // to leave PreferredFormat at TimedQuizConfig's default (QuestionFormat.Any)
+    // instead of reading Settings.PreferredFormat — so a student with
+    // "Multiple choice only" set in Settings could still land on a
+    // free-text question when starting a timed quiz. Quiz.razor already had
+    // this exact conversion via StringToQuestionFormat.
+    private StudyAI.Models.TimedQuizConfig BuildConfigFromSettings() => new()
+    {
+        NumQuestions = Settings.NumQuestions,
+        DifficultyFilter = Settings.DifficultyFilter,
+        PreferredFormat = StringToQuestionFormat(Settings.PreferredFormat)
+    };
+
+    // → OnInitializedAsync: initialize component state and start quiz
+    // immediately using settings from the home screen (model, difficulty,
+    // num questions) — there's no separate Setup/Configure step anymore,
+    // so State starts at Running (see its field initializer) and this just
+    // needs to kick off the first fetch.
     protected override async Task OnInitializedAsync()
     {
-        // Read settings from QuizSettings and build config.
-        //
-        // → Bug fix: this used to leave PreferredFormat at TimedQuizConfig's
-        // default (QuestionFormat.Any) instead of reading
-        // Settings.PreferredFormat — so a student with "Multiple choice
-        // only" set in Settings could still land on a free-text question
-        // when starting a timed quiz straight from the home screen (Any
-        // lets ClaudeQuizProvider.BuildToolsAndPrompt offer both the MCQ
-        // and short-answer tools with tool_choice: "auto" and leaves the
-        // pick to Claude). Quiz.razor already had this exact conversion via
-        // StringToQuestionFormat; TimedQuizConfigForm's own "Configure"
-        // screen also already sets PreferredFormat correctly — only this
-        // Quick-Start-from-Settings path was missing it.
-        CurrentConfig = new StudyAI.Models.TimedQuizConfig
-        {
-            NumQuestions = Settings.NumQuestions,
-            DifficultyFilter = Settings.DifficultyFilter,
-            PreferredFormat = StringToQuestionFormat(Settings.PreferredFormat)
-        };
-
-        // Set state to Running before starting (same as HandleConfigStart pattern)
-        State = TimedQuizState.Running;
-
-        // Start the quiz immediately
+        CurrentConfig = BuildConfigFromSettings();
         await StartQuiz();
     }
 
@@ -614,35 +614,6 @@
     public void Dispose()
     {
         StopUiRefreshTimer();
-    }
-
-    private async Task HandleQuickStart()
-    {
-        CurrentConfig = StudyAI.Models.TimedQuizConfig.QuickStart();
-        State = TimedQuizState.Running;
-        await StartQuiz();
-    }
-
-    // → Show the config screen. This used to be an empty method — the comment
-    // claimed the config screen was "handled by setupComponent," but
-    // QuickStartOrConfigure never had that logic either, so clicking
-    // Configure did nothing at all. TimedQuizConfigForm is the actual screen.
-    private void HandleConfigure()
-    {
-        State = TimedQuizState.Configuring;
-    }
-
-    // → Student finished the config form and clicked Start Quiz.
-    private async Task HandleConfigStart(StudyAI.Models.TimedQuizConfig config)
-    {
-        CurrentConfig = config;
-        State = TimedQuizState.Running;
-        await StartQuiz();
-    }
-
-    private void HandleConfigCancel()
-    {
-        State = TimedQuizState.Setup;
     }
 
     private async Task StartQuiz()
@@ -1091,14 +1062,19 @@
         State = TimedQuizState.Results;
     }
 
-    private void HandleRestart()
+    // → "Start Over" / "Start Another Quiz" from either review or Results.
+    // No intermediate Setup screen anymore — goes straight into a fresh
+    // quiz using whatever the home screen's Settings currently says, same
+    // as a first visit to this page. StartQuiz already does everything a
+    // restart needs (resets Attempts/MarkedForReview/the run-id guard,
+    // restarts the UI refresh timer), so this only needs to rebuild config
+    // and set State back to Running before handing off to it.
+    private async Task HandleRestart()
     {
-        StopUiRefreshTimer();
-        State = TimedQuizState.Setup;
+        CurrentConfig = BuildConfigFromSettings();
+        State = TimedQuizState.Running;
         QuizResult = null;
-        Attempts.Clear();
-        MarkedForReview.Clear();
-        MarkedQuestionsFinalized = false;
+        await StartQuiz();
     }
 
     // → Same mapping Quiz.razor uses (StringToQuestionFormat) — kept here

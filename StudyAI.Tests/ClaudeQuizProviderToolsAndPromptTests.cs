@@ -235,4 +235,24 @@ public class ClaudeQuizProviderToolsAndPromptTests
         Assert.Contains("create_multiple_choice_question", toolsJson[0]);
         Assert.Contains("create_short_answer_question", toolsJson[1]);
     }
+
+    [Fact]
+    public void BuildToolsAndPrompt_MultipleChoiceTool_PromptFieldAsksForConciseness()
+    {
+        // The MCQ tool's prompt field used to have no length guidance at all
+        // (unlike the short-answer tool's "answerable in a sentence or two"),
+        // which was part of why questions could balloon in length over a run
+        // — see BuildAvoidClause's comment for the other half of that fix.
+        var (tools, _, _) = ClaudeQuizProvider.BuildToolsAndPrompt(
+            "C# Basics",
+            "Medium",
+            QuestionFormat.Any,
+            null,
+            null);
+
+        var mcqToolJson = tools.Select(t => t.ToString() ?? "")
+            .First(t => t.Contains("create_multiple_choice_question"));
+
+        Assert.Contains("concise", mcqToolJson);
+    }
 }

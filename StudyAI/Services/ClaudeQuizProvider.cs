@@ -315,7 +315,7 @@ public class ClaudeQuizProvider : IQuizProvider
                 type = "object",
                 properties = new
                 {
-                    prompt = new { type = "string", description = "The question text." },
+                    prompt = new { type = "string", description = "The question text — 2-4 sentences, concise even for a scenario-based question." },
                     choices = new
                     {
                         type = "array",
@@ -385,13 +385,40 @@ public class ClaudeQuizProvider : IQuizProvider
     // just replays back what it already showed the user. Pulled out as its
     // own pure method for the same reason ResolveModel was: directly testable
     // without touching HttpClient. See StudyAI.Tests/ClaudeQuizProviderAvoidClauseTests.cs.
+    //
+    // → This clause used to just say "don't repeat these" and list the full
+    // prompts verbatim, with no cap on length in either direction. That has a
+    // real failure mode: told not to repeat or rephrase a growing list of
+    // prior questions, Claude's easiest way to guarantee it's "different
+    // enough" is to add more scenario detail rather than pick a genuinely
+    // different concept — so questions kept getting longer over a run (by
+    // question 8-10, sometimes a full page for one prompt). And it compounds:
+    // a longer question produces a longer avoid-list entry next time, which
+    // pushes toward an even longer question after that. Two fixes here:
+    // TruncateForAvoidList caps what gets replayed back (breaking the
+    // feedback loop at its source), and the explicit "vary the concept, not
+    // the amount of detail" sentence steers HOW Claude tries to be different.
     public static string BuildAvoidClause(IReadOnlyList<string>? recentPrompts)
     {
         if (recentPrompts is null || recentPrompts.Count == 0) return "";
 
-        var list = string.Join("\n", recentPrompts.Select(p => $"- {p}"));
-        return "\n\nDo not repeat or closely rephrase any of these already-asked questions:\n" + list;
+        var list = string.Join("\n", recentPrompts.Select(p => $"- {TruncateForAvoidList(p)}"));
+        return "\n\nDo not repeat or closely rephrase any of these already-asked questions:\n" + list +
+               "\n\nVary the underlying concept or angle to stay different from the list above — " +
+               "not the amount of detail. Keep the question just as concise as it would be without this list.";
     }
+
+    // → A truncated prompt is still more than enough for Claude to recognize
+    // and avoid repeating the same question — the avoid-list only needs to
+    // be recognizable, not complete. TrimEnd before appending the ellipsis
+    // avoids a truncation landing mid-word with a trailing space looking odd
+    // (e.g. "...the constructor …" instead of "...the construct…").
+    private const int AvoidListEntryMaxChars = 100;
+
+    private static string TruncateForAvoidList(string prompt) =>
+        prompt.Length <= AvoidListEntryMaxChars
+            ? prompt
+            : prompt[..AvoidListEntryMaxChars].TrimEnd() + "…";
 
     // Tools and MCPs (10.6%) / Prompt and Context Engineering (11.0%): a
     // qualitative instruction in the base prompt ("default to short-answer")

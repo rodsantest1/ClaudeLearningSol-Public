@@ -48,4 +48,69 @@ public class ClaudeQuizProviderAvoidClauseTests
         Assert.Contains("Question two?", result);
         Assert.Contains("Question three?", result);
     }
+
+    [Fact]
+    public void BuildAvoidClause_IncludesVaryConceptInstruction()
+    {
+        // The instruction that steers Claude toward being different by
+        // concept rather than by adding more words — see the class comment
+        // on the questions-getting-longer-over-a-run failure mode.
+        var result = ClaudeQuizProvider.BuildAvoidClause(new[] { "Some question?" });
+
+        Assert.Contains("Vary the underlying concept or angle", result);
+    }
+
+    // --- Avoid-list entry truncation ---------------------------------------
+    //
+    // Caps what gets replayed back per prior prompt, so a long question
+    // doesn't produce an equally long avoid-list entry that pressures the
+    // next question to be longer still.
+
+    [Fact]
+    public void BuildAvoidClause_ShortPrompt_IsNotTruncated()
+    {
+        const string shortPrompt = "What keyword makes a field settable only in the constructor?";
+
+        var result = ClaudeQuizProvider.BuildAvoidClause(new[] { shortPrompt });
+
+        Assert.Contains(shortPrompt, result);
+        Assert.DoesNotContain("…", result);
+    }
+
+    [Fact]
+    public void BuildAvoidClause_LongPrompt_IsTruncatedWithEllipsis()
+    {
+        var longPrompt = "Consider a scenario where " + new string('x', 200) + " what happens?";
+
+        var result = ClaudeQuizProvider.BuildAvoidClause(new[] { longPrompt });
+
+        Assert.Contains("…", result);
+        Assert.DoesNotContain(longPrompt, result);
+        // The full 200-x run shouldn't survive intact — only a truncated prefix should.
+        Assert.DoesNotContain(new string('x', 200), result);
+    }
+
+    [Fact]
+    public void BuildAvoidClause_LongPrompt_KeepsPrefixRecognizable()
+    {
+        var longPrompt = "Consider a scenario where " + new string('x', 200) + " what happens?";
+
+        var result = ClaudeQuizProvider.BuildAvoidClause(new[] { longPrompt });
+
+        Assert.Contains("Consider a scenario where", result);
+    }
+
+    [Fact]
+    public void BuildAvoidClause_MultipleLongPrompts_EachTruncatedIndependently()
+    {
+        var first = "First scenario description " + new string('a', 150);
+        var second = "Second scenario description " + new string('b', 150);
+
+        var result = ClaudeQuizProvider.BuildAvoidClause(new[] { first, second });
+
+        Assert.Contains("First scenario description", result);
+        Assert.Contains("Second scenario description", result);
+        Assert.DoesNotContain(new string('a', 150), result);
+        Assert.DoesNotContain(new string('b', 150), result);
+    }
 }

@@ -148,8 +148,16 @@ button:disabled {
 .timing {
     font-size: 0.75rem;
     color: #999;
-    margin: -0.5rem 0 0.5rem;
+    margin: 0.35rem 0 0.5rem;
 }
+
+/* → .recommendation and the pre-.answer-nav-footer instance both put
+   .timing right after a button (Use this / the question card itself
+   ending) with little natural spacing above — the base rule's old
+   negative top margin pulled the timing text up close enough to look
+   like it was overlapping the button/nav row below it. Bumping the base
+   margin to a small positive value fixes both without needing a
+   context-specific override for either. */
 
 /* → Sized to match TimedQuiz's QuizRunner.razor .short-answer-input — was
    noticeably smaller/tighter than Timed Quiz's free-text field. */
